@@ -240,22 +240,26 @@ def _build_daily_plain_text(listings: list[Listing], date_str: str) -> str:
 
 def _smtp_config() -> tuple:
     return (
-        _clean_email_field(os.environ.get("GMAIL_FROM", "")),
-        os.environ.get("GMAIL_APP_PASSWORD", ""),
+        _clean_email_field(os.environ.get("SMTP_FROM", os.environ.get("GMAIL_FROM", ""))),
+        os.environ.get("SMTP_PASSWORD", os.environ.get("GMAIL_APP_PASSWORD", "")),
         _clean_email_field(os.environ.get("EMAIL_TO", "")),
         _clean_email_field(os.environ.get("EMAIL_CC", "")),
     )
 
 
 def _send_email(subject_text: str, plain_text: str, html_body: str) -> bool:
-    gmail_from, gmail_password, email_to, email_cc = _smtp_config()
-    if not all([gmail_from, gmail_password, email_to]):
-        logger.error("Email config incomplete. Need GMAIL_FROM, GMAIL_APP_PASSWORD, EMAIL_TO")
+    smtp_from, smtp_password, email_to, email_cc = _smtp_config()
+    smtp_host = os.environ.get("SMTP_HOST", "ssl0.ovh.net")
+    smtp_port = int(os.environ.get("SMTP_PORT", "465"))
+    smtp_use_tls = os.environ.get("SMTP_TLS", "0") == "1"
+
+    if not all([smtp_from, smtp_password, email_to]):
+        logger.error("Email config incomplete. Need SMTP_FROM, SMTP_PASSWORD, EMAIL_TO")
         return False
 
     msg = EmailMessage(policy=SMTPUTF8)
     msg["Subject"] = subject_text
-    msg["From"] = gmail_from
+    msg["From"] = smtp_from
     msg["To"] = email_to
     if email_cc:
         msg["Cc"] = email_cc
@@ -268,18 +272,26 @@ def _send_email(subject_text: str, plain_text: str, html_body: str) -> bool:
         recipients.extend([a.strip() for a in email_cc.split(",") if a.strip()])
 
     try:
-        logger.info("Sending to %s (CC: %s)", email_to, email_cc or "none")
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.ehlo()
-            server.starttls()
-            server.ehlo()
-            server.login(gmail_from, gmail_password)
-            mo = ["SMTPUTF8"] if server.has_extn("smtputf8") else []
-            server.sendmail(gmail_from, recipients, msg.as_bytes(policy=SMTPUTF8), mail_options=mo)
+        logger.info("Sending via %s:%s to %s (CC: %s)", smtp_host, smtp_port, email_to, email_cc or "none")
+        if smtp_use_tls:
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.ehlo()
+                server.starttls()
+                server.ehlo()
+                server.login(smtp_from, smtp_password)
+                mo = ["SMTPUTF8"] if server.has_extn("smtputf8") else []
+                server.sendmail(smtp_from, recipients, msg.as_bytes(policy=SMTPUTF8), mail_options=mo)
+        else:
+            import ssl
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, context=context) as server:
+                server.login(smtp_from, smtp_password)
+                mo = ["SMTPUTF8"] if server.has_extn("smtputf8") else []
+                server.sendmail(smtp_from, recipients, msg.as_bytes(policy=SMTPUTF8), mail_options=mo)
         logger.info("Email sent")
         return True
     except smtplib.SMTPAuthenticationError:
-        logger.error("Gmail auth failed. Check GMAIL_FROM and GMAIL_APP_PASSWORD.")
+        logger.error("SMTP auth failed. Check credentials.")
         return False
     except Exception as exc:
         logger.error("Failed to send: %s", exc)
