@@ -1,4 +1,6 @@
-"""AI text scoring using Groq API (Llama 3.3 70B) for 'modern & clean' vibes."""
+"""AI text scoring using OpenRouter (DeepSeek Chat) for 'modern & clean' house vibes."""
+
+from __future__ import annotations
 
 import json
 import logging
@@ -15,14 +17,14 @@ DEFAULT_REASONING = "AI scoring unavailable — unranked"
 
 
 class TextScorer:
-    """Score listing descriptions for modern/clean vibes using Groq API."""
+    """Score listing descriptions for modern/clean vibes using OpenRouter DeepSeek."""
 
-    MODEL = "llama-3.3-70b-versatile"
+    MODEL = "deepseek/deepseek-chat"
     MAX_RETRIES = 2
     RETRY_DELAY = 5  # seconds
 
-    SYSTEM_PROMPT = """You are a real estate quality analyzer specializing in Belgian rental apartments. 
-You evaluate apartment listings for how MODERN and CLEAN they appear based on their description.
+    SYSTEM_PROMPT = """You are a real estate quality analyzer specializing in Belgian houses for sale.
+You evaluate property listings for how MODERN and CLEAN they appear based on their description.
 
 Your scoring criteria (1-10 scale):
 - 9-10: Clearly renovated/new build, modern finishes, contemporary design
@@ -36,17 +38,19 @@ Key positive indicators (Dutch/Flemish):
 - "nieuwe keuken", "inbouwtoestellen", "strakke afwerking", "design"
 - "recentelijk vernieuwd", "eigentijds", "kwalitatief", "luxueus"
 - Good EPC labels (A, B), new appliances, quality materials
+- Garden/terrace, parking/garage, good location in desirable neighbourhood
 
 Key negative indicators:
 - "op te frissen", "te renoveren", "originele staat", "klassiek"
 - "oudere keuken", "verouderd", "basisafwerking"
+- Lack of parking, no outdoor space, poor EPC (D/E/F), busy road location
 
 You MUST respond with valid JSON only. No extra text."""
 
-    USER_PROMPT_TEMPLATE = """Score this apartment listing for modernity and cleanliness.
+    USER_PROMPT_TEMPLATE = """Score this property listing for modernity and cleanliness.
 
 Title: {title}
-Price: €{price}/month
+Price: €{price}
 Address: {address}
 Surface: {surface}m²
 EPC: {epc}
@@ -59,20 +63,23 @@ Respond with this exact JSON format:
 {{"modern_score": <number 1-10>, "reasoning": "<brief 1-2 sentence explanation>"}}"""
 
     def __init__(self):
-        self.api_key = os.environ.get("GROQ_API_KEY", "")
+        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
         self.client = None
 
         if self.api_key:
             try:
-                from groq import Groq
-                self.client = Groq(api_key=self.api_key)
-                logger.info("✅ Groq client initialized")
+                from openai import OpenAI
+                self.client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=self.api_key,
+                )
+                logger.info("✅ OpenRouter DeepSeek text scorer initialized")
             except ImportError:
-                logger.warning("⚠️ groq package not installed, text scoring disabled")
+                logger.warning("⚠️ openai package not installed, text scoring disabled")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize Groq client: {e}")
+                logger.warning(f"⚠️ Failed to initialize OpenRouter client: {e}")
         else:
-            logger.warning("⚠️ GROQ_API_KEY not set, text scoring disabled")
+            logger.warning("⚠️ OPENROUTER_API_KEY not set, text scoring disabled")
 
     @property
     def is_available(self) -> bool:
@@ -111,9 +118,12 @@ Respond with this exact JSON format:
                         {"role": "system", "content": self.SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    response_format={"type": "json_object"},
                     temperature=0.3,
                     max_tokens=200,
+                    extra_headers={
+                        "HTTP-Referer": "https://github.com/apartment-hunter",
+                        "X-Title": "Apartment Hunter",
+                    },
                 )
 
                 content = response.choices[0].message.content

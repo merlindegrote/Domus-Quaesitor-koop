@@ -1,14 +1,4 @@
-"""Immoweb.be scraper for rental apartments in Ghent.
-
-Immoweb uses server-side rendering. Listing cards are in the HTML as:
-  - <li class="search-results__item"> containing <article class="card card--result">
-  - Title/URL: <a class="card__title-link"> with href to /en/classified/apartment/for-rent/gent/9000/ID
-  - Price: <span aria-hidden="true" class="resizable-text ..."> inside .card--result__price
-  - Bedrooms: <p class="card__information--property"> text like "1 bdr. · 60 m²"
-  - Location: <p class="card--results__information--locality"> text like "9000 Gent"
-  - Image: <img class="card__media-picture"> with src URL
-  - Listing ID: <article id="classified_XXXXXXXX">
-"""
+"""Immoweb.be scraper for houses for-sale."""
 
 from __future__ import annotations
 
@@ -25,14 +15,14 @@ logger = logging.getLogger(__name__)
 
 
 class ImmowebScraper(BaseScraper):
-    """Scraper for Immoweb.be rental listings."""
+    """Scraper for Immoweb.be house for-sale listings."""
 
     PLATFORM_NAME = "immoweb"
     REQUEST_DELAY = 2.0
 
-    # Search URL with filters for rentals
+    # Search URL with filters for houses for-sale
     SEARCH_URL = (
-        "https://www.immoweb.be/en/search/apartment/for-rent"
+        "https://www.immoweb.be/en/search/house/for-sale"
         "?countries=BE"
         f"&postalCodes=BE-{TARGET_POSTAL_CODE}"
         f"&minPrice={MIN_PRICE}"
@@ -44,9 +34,9 @@ class ImmowebScraper(BaseScraper):
 
     MAX_PAGES = 3
 
-    # Immoweb search-results API — the frontend fetches JSON from this endpoint
+    # Immoweb search-results API
     API_URL = (
-        "https://www.immoweb.be/en/search-results/apartment/for-rent"
+        "https://www.immoweb.be/en/search-results/house/for-sale"
         "?countries=BE"
         f"&postalCodes=BE-{TARGET_POSTAL_CODE}"
         f"&minPrice={MIN_PRICE}"
@@ -62,32 +52,26 @@ class ImmowebScraper(BaseScraper):
 
         for page in range(1, self.MAX_PAGES + 1):
             url = self.SEARCH_URL.format(page=page)
-
-            # Try JSON API first (XHR-style request), then fall back to HTML
             page_listings = self._scrape_via_api(page)
             if not page_listings:
                 page_listings = self._scrape_search_page(url)
-
             if not page_listings:
                 logger.info(f"[{self.PLATFORM_NAME}] No more results on page {page}")
                 break
-
             listings.extend(page_listings)
             logger.info(f"[{self.PLATFORM_NAME}] Page {page}: {len(page_listings)} listings")
 
         return listings
 
     def _scrape_via_api(self, page: int) -> list[Listing]:
-        """Try Immoweb's search API which returns JSON (less likely to be blocked)."""
+        """Try Immoweb's search API which returns JSON."""
         api_url = self.API_URL.format(page=page)
         try:
-            # Mimic an XHR request from the Immoweb frontend
             response = self._rate_limited_get(api_url, headers={
                 "Accept": "application/json",
                 "X-Requested-With": "XMLHttpRequest",
             })
             data = response.json()
-
             results = data if isinstance(data, list) else data.get("results", [])
             listings = []
             for item in results:
@@ -112,16 +96,13 @@ class ImmowebScraper(BaseScraper):
             price_data = item.get("price", {})
             price = 0
             if isinstance(price_data, dict):
-                price = int(price_data.get("mainValue") or price_data.get("monthlyRentalPrice") or 0)
+                price = int(price_data.get("mainValue") or 0)
             elif isinstance(price_data, (int, float)):
                 price = int(price_data)
-
             if price == 0:
-                transaction = item.get("transaction", {})
-                if isinstance(transaction, dict):
-                    rental = transaction.get("rental", {})
-                    if isinstance(rental, dict):
-                        price = int(rental.get("monthlyRentalPrice", 0))
+                sale = item.get("transaction", {}).get("sale", {})
+                if isinstance(sale, dict):
+                    price = int(sale.get("price", 0) or 0)
 
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
@@ -147,15 +128,21 @@ class ImmowebScraper(BaseScraper):
             if isinstance(prop, dict) and prop.get("netHabitableSurface"):
                 surface = int(prop["netHabitableSurface"])
 
+            # Lot surface
+            lot_surface = None
+            if isinstance(prop, dict) and prop.get("land", {}).get("surface"):
+                lot_surface = int(prop["land"]["surface"])
+
+            # EPC
+            epc = None
+            if isinstance(prop, dict) and prop.get("certificates", {}).get("epcScore"):
+                epc = prop["certificates"]["epcScore"]
+
             # Title
-            title = item.get("title", "") or f"Apartment in {address}"
+            title = item.get("title", "") or f"House in {address}"
 
             # URL
-            url = f"https://www.immoweb.be/en/classified/apartment/for-rent/{listing_id}"
-            if item.get("property", {}).get("location", {}).get("locality"):
-                loc_name = loc["locality"].lower().replace(" ", "-")
-                postal = loc.get("postalCode", TARGET_POSTAL_CODE)
-                url = f"https://www.immoweb.be/en/classified/apartment/for-rent/{loc_name}/{postal}/{listing_id}"
+            url = f"https://www.immoweb.be/en/classified/house/for-sale/{listing_id}"
 
             # Images
             images = []
@@ -180,6 +167,8 @@ class ImmowebScraper(BaseScraper):
                 description="",
                 image_urls=images,
                 surface_m2=surface,
+                lot_surface_m2=lot_surface,
+                epc_label=epc,
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse API result: {e}")
@@ -195,11 +184,8 @@ class ImmowebScraper(BaseScraper):
         soup = BeautifulSoup(response.text, "lxml")
         listings = []
 
-        # Primary: parse SSR HTML cards — this is the confirmed working structure
-        # Immoweb renders article.card.card--result inside li.search-results__item
         cards = soup.select("article.card--result")
         if not cards:
-            # Fallback selectors
             cards = soup.select("article.card")
         if not cards:
             cards = soup.select("[id^='classified_']")
@@ -211,7 +197,6 @@ class ImmowebScraper(BaseScraper):
             if listing:
                 listings.append(listing)
 
-        # If no HTML cards found, try JSON extraction as last resort
         if not listings:
             json_listings = self._extract_json_data(response.text)
             if json_listings:
@@ -223,16 +208,14 @@ class ImmowebScraper(BaseScraper):
         return listings
 
     def _parse_html_card(self, card: BeautifulSoup) -> Listing | None:
-        """Parse a listing from a confirmed Immoweb HTML card structure."""
+        """Parse a listing from Immoweb HTML card."""
         try:
-            # Check for JSON data in @click first! This is the most reliable method
-            # for SSR Immoweb pages.
             link = card.select_one("a.card__title-link")
             if not link:
                 link = card.select_one("a[href*='/classified/']")
             if not link:
                 return None
-                
+
             href = link.get("href", "")
             if not href.startswith("http"):
                 href = f"https://www.immoweb.be{href}"
@@ -244,137 +227,47 @@ class ImmowebScraper(BaseScraper):
                     try:
                         decoder = json.JSONDecoder()
                         data, _ = decoder.raw_decode(click_val[idx:])
-                        
-                        listing_id = str(data.get("id", ""))
-                        
-                        # Price
-                        price_data = data.get("price", {})
-                        if isinstance(price_data, dict):
-                            price = int(price_data.get("mainValue") or price_data.get("monthlyRentalPrice") or 0)
-                        else:
-                            price = 0
-                            
-                        if price == 0 and "transaction" in data:
-                            rental = data.get("transaction", {}).get("rental", {})
-                            if isinstance(rental, dict):
-                                price = int(rental.get("monthlyRentalPrice", 0))
-                        
-                        if not (MIN_PRICE <= price <= MAX_PRICE):
-                            logger.debug(f"[{self.PLATFORM_NAME}] Skipping {listing_id}: price €{price} out of range")
-                            return None
-                            
-                        # Location
-                        loc_data = data.get("property", {}).get("location", {})
-                        if isinstance(loc_data, dict):
-                            address = f"{loc_data.get('postalCode', TARGET_POSTAL_CODE)} {loc_data.get('locality', TARGET_CITY.capitalize())}"
-                        else:
-                            address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
-                        
-                        # Bedrooms
-                        bedrooms = 0
-                        prop_data = data.get("property", {})
-                        if isinstance(prop_data, dict):
-                            bedrooms = int(prop_data.get("bedroomCount", 0))
-                        if bedrooms < MIN_BEDROOMS:
-                            logger.debug(f"[{self.PLATFORM_NAME}] Skipping {listing_id}: no bedrooms found")
-                            return None
-                            
-                        # Surface
-                        surface = None
-                        if isinstance(prop_data, dict):
-                            surface = prop_data.get("netHabitableSurface")
-                            if surface is not None:
-                                surface = int(surface)
-                        
-                        # Images
-                        images = []
-                        pics = data.get("media", {}).get("pictures", [])
-                        if isinstance(pics, list):
-                            for pic in pics[:5]:
-                                if isinstance(pic, dict):
-                                    img_url = pic.get("largeUrl") or pic.get("mediumUrl") or pic.get("smallUrl")
-                                    if img_url:
-                                        images.append(img_url)
-                                        
-                        title = link.get_text(strip=True) or "Apartment"
-                        
-                        return Listing(
-                            id=listing_id,
-                            platform=self.PLATFORM_NAME,
-                            title=f"{title} — {address}",
-                            price=price,
-                            bedrooms=bedrooms,
-                            address=address,
-                            url=href,
-                            description="",
-                            image_urls=images,
-                            surface_m2=surface,
-                        )
+                        return self._parse_click_data(data, href)
                     except json.JSONDecodeError:
                         pass
-            
-            # Extract listing ID from article id attribute: "classified_21470905"
-            article_id = card.get("id", "")
-            listing_id = ""
-            if article_id.startswith("classified_"):
-                listing_id = article_id.replace("classified_", "")
 
-            # Extract ID from URL if not found in article id
+            article_id = card.get("id", "")
+            listing_id = article_id.replace("classified_", "") if article_id.startswith("classified_") else ""
+
             if not listing_id:
                 id_match = re.search(r'/(\d{6,})', href)
                 listing_id = id_match.group(1) if id_match else ""
             if not listing_id:
                 return None
 
-            # Title
-            title = link.get_text(strip=True) or "Apartment"
+            title = link.get_text(strip=True) or "House"
 
-            # Price — look for the aria-hidden span inside price element
+            # Price
             price = 0
             price_el = card.select_one(".card--result__price, .price__formatted, [class*='price']")
             if price_el:
-                # Get the visible text (aria-hidden="true" span)
                 visible_span = price_el.select_one("span[aria-hidden='true']")
-                if visible_span:
-                    price_text = visible_span.get_text(strip=True)
-                else:
-                    price_text = price_el.get_text(strip=True)
+                price_text = visible_span.get_text(strip=True) if visible_span else price_el.get_text(strip=True)
                 price = self._parse_price(price_text)
-
             if not (MIN_PRICE <= price <= MAX_PRICE):
-                logger.debug(f"[{self.PLATFORM_NAME}] Skipping {listing_id}: price €{price} out of range")
                 return None
 
             # Location
-            location_el = card.select_one(
-                "[class*='information--locality'], "
-                "[class*='locality'], "
-                ".card__location"
-            )
+            location_el = card.select_one("[class*='information--locality'], [class*='locality'], .card__location")
             address = location_el.get_text(strip=True) if location_el else f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
 
-            # Bedrooms and surface from the information element
-            # Text looks like: "1 bdr. · 60 m²" or "2 bdr. · 95 m²"
-            info_el = card.select_one(
-                ".card__information--property, "
-                "[class*='information--property']"
-            )
+            # Bedrooms and surface
+            info_el = card.select_one(".card__information--property, [class*='information--property']")
             info_text = info_el.get_text() if info_el else card.get_text()
-
             bedrooms = self._extract_bedrooms(info_text)
             surface = self._extract_surface_m2(info_text)
-
             if bedrooms < MIN_BEDROOMS:
-                # Try from full card text as fallback
                 bedrooms = self._extract_bedrooms(card.get_text())
             if bedrooms < MIN_BEDROOMS:
-                logger.debug(f"[{self.PLATFORM_NAME}] Skipping {listing_id}: no bedrooms found")
                 return None
 
             # Image
-            img = card.select_one("img.card__media-picture, img[class*='card__media']")
-            if not img:
-                img = card.select_one("img[src*='immowebstatic'], img[src]")
+            img = card.select_one("img.card__media-picture, img[class*='card__media'], img[src*='immowebstatic']")
             image_url = ""
             if img:
                 image_url = img.get("src") or img.get("data-src") or ""
@@ -387,12 +280,83 @@ class ImmowebScraper(BaseScraper):
                 bedrooms=bedrooms,
                 address=address,
                 url=href,
-                description="",  # Will be enriched from detail page
+                description="",
                 image_urls=[image_url] if image_url else [],
                 surface_m2=surface,
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse HTML card: {e}")
+            return None
+
+    def _parse_click_data(self, data: dict, href: str) -> Listing | None:
+        """Parse listing from @click JSON data."""
+        try:
+            listing_id = str(data.get("id", ""))
+            if not listing_id:
+                return None
+
+            price_data = data.get("price", {})
+            if isinstance(price_data, dict):
+                price = int(price_data.get("mainValue") or 0)
+            else:
+                price = 0
+            if price == 0 and "transaction" in data:
+                sale = data.get("transaction", {}).get("sale", {})
+                if isinstance(sale, dict):
+                    price = int(sale.get("price", 0) or 0)
+            if not (MIN_PRICE <= price <= MAX_PRICE):
+                return None
+
+            loc_data = data.get("property", {}).get("location", {})
+            if isinstance(loc_data, dict):
+                address = f"{loc_data.get('postalCode', TARGET_POSTAL_CODE)} {loc_data.get('locality', TARGET_CITY.capitalize())}"
+            else:
+                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+
+            prop_data = data.get("property", {})
+            bedrooms = int(prop_data.get("bedroomCount", 0)) if isinstance(prop_data, dict) else 0
+            if bedrooms < MIN_BEDROOMS:
+                return None
+
+            surface = None
+            if isinstance(prop_data, dict) and prop_data.get("netHabitableSurface"):
+                surface = int(prop_data["netHabitableSurface"])
+
+            lot_surface = None
+            if isinstance(prop_data, dict) and prop_data.get("land", {}).get("surface"):
+                lot_surface = int(prop_data["land"]["surface"])
+
+            epc = None
+            if isinstance(prop_data, dict) and prop_data.get("certificates", {}).get("epcScore"):
+                epc = prop_data["certificates"]["epcScore"]
+
+            images = []
+            pics = data.get("media", {}).get("pictures", [])
+            if isinstance(pics, list):
+                for pic in pics[:5]:
+                    if isinstance(pic, dict):
+                        img_url = pic.get("largeUrl") or pic.get("mediumUrl") or pic.get("smallUrl")
+                        if img_url:
+                            images.append(img_url)
+
+            title = "House"
+
+            return Listing(
+                id=listing_id,
+                platform=self.PLATFORM_NAME,
+                title=f"{title} — {address}",
+                price=price,
+                bedrooms=bedrooms,
+                address=address,
+                url=href,
+                description="",
+                image_urls=images,
+                surface_m2=surface,
+                lot_surface_m2=lot_surface,
+                epc_label=epc,
+            )
+        except Exception as e:
+            logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse click data: {e}")
             return None
 
     def enrich_listing(self, listing: Listing) -> Listing:
@@ -403,7 +367,6 @@ class ImmowebScraper(BaseScraper):
         try:
             response = self._rate_limited_get(listing.url)
 
-            # Try to extract from window.classified JSON (detail pages have this)
             classified_match = re.search(
                 r'window\.classified\s*=\s*(\{.*?\});\s*\n',
                 response.text,
@@ -427,22 +390,18 @@ class ImmowebScraper(BaseScraper):
                         listing.epc_label = self._extract_epc_from_json(data)
                     if not listing.surface_m2:
                         listing.surface_m2 = self._extract_surface_from_json(data)
+                    if not listing.lot_surface_m2:
+                        listing.lot_surface_m2 = self._extract_lot_surface_from_json(data)
                     return listing
                 except json.JSONDecodeError:
                     pass
 
-            # Fallback: parse HTML of detail page
+            # Fallback HTML parse
             soup = BeautifulSoup(response.text, "lxml")
-
             if not listing.description:
-                desc_el = soup.select_one(
-                    "[class*='classified__description'], "
-                    ".description, "
-                    "#classified-description-content"
-                )
+                desc_el = soup.select_one("[class*='classified__description'], .description")
                 if desc_el:
                     listing.description = desc_el.get_text(strip=True)
-
             if len(listing.image_urls) <= 1:
                 images = soup.select("[class*='classified__gallery'] img, .gallery img")
                 listing.image_urls = [
@@ -450,17 +409,13 @@ class ImmowebScraper(BaseScraper):
                     for img in images[:5]
                     if img.get("src") or img.get("data-src")
                 ]
-
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to enrich listing {listing.id}: {e}")
 
         return listing
 
-    # --- JSON extraction (fallback) ---
-
     def _extract_json_data(self, html: str) -> list[dict] | None:
-        """Try to extract listing data from embedded JSON."""
-        # JSON-LD
+        """Extract listing data from embedded JSON."""
         soup = BeautifulSoup(html, "lxml")
         scripts = soup.find_all("script", type="application/ld+json")
         for script in scripts:
@@ -473,7 +428,7 @@ class ImmowebScraper(BaseScraper):
         return None
 
     def _parse_json_listing(self, item: dict) -> Listing | None:
-        """Parse a listing from JSON-LD or embedded data."""
+        """Parse a listing from JSON-LD."""
         try:
             actual = item.get("item", item) if isinstance(item, dict) else item
             listing_id = str(actual.get("id", ""))
@@ -483,16 +438,14 @@ class ImmowebScraper(BaseScraper):
                 listing_id = id_match.group(1) if id_match else ""
             if not listing_id:
                 return None
-
             offers = actual.get("offers", {})
             price = int(offers.get("price", 0)) if isinstance(offers, dict) else 0
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
-
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=actual.get("name", f"Apartment — €{price}/mo"),
+                title=actual.get("name", f"House — €{price}"),
                 price=price,
                 bedrooms=MIN_BEDROOMS,
                 address=f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}",
@@ -504,23 +457,17 @@ class ImmowebScraper(BaseScraper):
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse JSON listing: {e}")
             return None
 
-    # --- Helper methods ---
-
     @staticmethod
     def _parse_price(text: str) -> int:
-        """Extract the main rent price from text like '€850 (+ €40)' or '€980/month'.
-
-        We want the FIRST number which is the base rent, ignoring charges.
-        """
-        # Remove euro sign and common separators
+        """Extract price from text like '€450.000' or '€ 550 000'."""
         clean = text.replace("€", "").replace("\u20ac", "")
-        # Find the first number (the base rent)
-        match = re.search(r'(\d[\d\s.,]*\d|\d+)', clean)
+        match = re.search(r'([\d\s.,]+)', clean)
         if match:
-            num_str = match.group(1).replace(" ", "").replace(".", "").replace(",", "")
+            num_str = match.group(1).strip()
+            num_str = num_str.replace(" ", "").replace(".", "").replace(",", "")
             try:
                 price = int(num_str)
-                if 100 <= price <= 10000:
+                if 50000 <= price <= 2000000:
                     return price
             except ValueError:
                 pass
@@ -528,13 +475,8 @@ class ImmowebScraper(BaseScraper):
 
     @staticmethod
     def _extract_bedrooms(text: str) -> int:
-        """Extract bedroom count from text like '1 bdr.' or '2 bedrooms'."""
-        patterns = [
-            r'(\d+)\s*bdr',
-            r'(\d+)\s*bed',
-            r'(\d+)\s*slaapkamer',
-            r'(\d+)\s*chambre',
-        ]
+        """Extract bedroom count."""
+        patterns = [r'(\d+)\s*bdr', r'(\d+)\s*bed', r'(\d+)\s*slaapkamer', r'(\d+)\s*chambre']
         for pattern in patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -543,11 +485,9 @@ class ImmowebScraper(BaseScraper):
 
     @staticmethod
     def _extract_surface_m2(text: str) -> int | None:
-        """Extract surface area from text like '60 m²'."""
+        """Extract surface area."""
         match = re.search(r'(\d+)\s*m²', text)
-        if match:
-            return int(match.group(1))
-        return None
+        return int(match.group(1)) if match else None
 
     @staticmethod
     def _extract_epc_from_json(data: dict) -> str | None:
@@ -581,14 +521,22 @@ class ImmowebScraper(BaseScraper):
             pass
         return None
 
+    @staticmethod
+    def _extract_lot_surface_from_json(data: dict) -> int | None:
+        """Extract lot/land surface from detail page JSON."""
+        try:
+            val = data.get("property", {}).get("land", {}).get("surface")
+            if val:
+                return int(val)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return None
 
-# Allow running standalone for testing
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     scraper = ImmowebScraper()
     results = scraper.safe_scrape()
     for r in results:
-        print(f"  [{r.id}] {r.title} — €{r.price} — {r.bedrooms}bd — {r.surface_m2}m² — {r.address}")
-        if r.image_urls:
-            print(f"    📷 {r.image_urls[0][:80]}...")
+        print(f"  [{r.id}] {r.title} — €{r.price} — {r.bedrooms}bd — {r.surface_m2}m² — EPC {r.epc_label}")
     print(f"\nTotal: {len(results)} listings")

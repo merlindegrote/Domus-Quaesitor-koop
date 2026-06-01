@@ -1,4 +1,4 @@
-"""Immoscoop.be scraper for rental apartments in Ghent."""
+"""Immoscoop.be scraper for for-sale houses in Ghent."""
 
 from __future__ import annotations
 
@@ -15,13 +15,13 @@ logger = logging.getLogger(__name__)
 
 
 class ImmoscoopScraper(BaseScraper):
-    """Scraper for Immoscoop.be rental listings."""
+    """Scraper for Immoscoop.be for-sale listings."""
 
     PLATFORM_NAME = "immoscoop"
     REQUEST_DELAY = 3.0
 
-    SEARCH_URL = f"https://www.immoscoop.be/zoeken/te-huur/{TARGET_POSTAL_CODE}-{TARGET_CITY.lower()}/appartement?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
-    SEARCH_URL_ALT = f"https://www.immoscoop.be/zoeken/te-huur/{TARGET_CITY.lower()}/appartement?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
+    SEARCH_URL = f"https://www.immoscoop.be/zoeken/te-koop/{TARGET_POSTAL_CODE}-{TARGET_CITY.lower()}/huis?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
+    SEARCH_URL_ALT = f"https://www.immoscoop.be/zoeken/te-koop/{TARGET_CITY.lower()}/huis?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
 
     MAX_PAGES = 3
 
@@ -98,7 +98,7 @@ class ImmoscoopScraper(BaseScraper):
 
         for link in soup.find_all("a", href=True):
             title_text = link.get_text(" ", strip=True)
-            if "Appartement te huur" not in title_text:
+            if "Huis te koop" not in title_text:
                 continue
 
             href = link.get("href", "")
@@ -276,7 +276,7 @@ class ImmoscoopScraper(BaseScraper):
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get("name", f"Apartment in {TARGET_CITY.capitalize()} — €{price}/mo"),
+                title=item.get("name", f"House in {TARGET_CITY.capitalize()} — €{price}"),
                 price=price,
                 bedrooms=MIN_BEDROOMS,
                 address=self._extract_address(item),
@@ -320,7 +320,7 @@ class ImmoscoopScraper(BaseScraper):
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get("title", item.get("name", f"Apartment in {TARGET_CITY.capitalize()} — €{price}/mo")),
+                title=item.get("title", item.get("name", f"House in {TARGET_CITY.capitalize()} — €{price}")),
                 price=price,
                 bedrooms=bedrooms,
                 address=item.get("address", item.get("location", TARGET_CITY.capitalize())),
@@ -354,7 +354,7 @@ class ImmoscoopScraper(BaseScraper):
 
             # Title
             title_el = card.select_one("h2, h3, [class*='title']")
-            title = title_el.get_text(strip=True) if title_el else f"Apartment in {TARGET_CITY.capitalize()}"
+            title = title_el.get_text(strip=True) if title_el else f"House in {TARGET_CITY.capitalize()}"
 
             # Price
             price_el = card.select_one("[class*='price'], [class*='prijs']")
@@ -427,7 +427,7 @@ class ImmoscoopScraper(BaseScraper):
         for num in numbers:
             try:
                 price = int(num)
-                if 100 <= price <= 10000:
+                if 50000 <= price <= 2000000:
                     return price
             except ValueError:
                 continue

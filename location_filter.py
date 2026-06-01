@@ -1,68 +1,88 @@
-"""Heuristic location filtering for proximity preferences."""
+"""City/location filtering for accepted and excluded areas."""
 
 from __future__ import annotations
 
-import os
-from dataclasses import dataclass
+import logging
+import re
 
 from scrapers.base import Listing
-from config import (
-    ENABLE_STATION_FILTER,
-    STATION_NEAR_KEYWORDS,
-    STATION_FAR_KEYWORDS,
-)
+from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL
+
+logger = logging.getLogger(__name__)
 
 
-@dataclass(frozen=True)
-class StationFilterResult:
-    keep: bool
-    score: int
-    reason: str
+def _normalize_city(name: str) -> str:
+    """Normalize city name for comparison."""
+    return name.strip().lower().replace("-", " ").replace("'", "")
 
 
-def station_filter_enabled() -> bool:
-    """Check whether location filtering is enabled."""
-    return ENABLE_STATION_FILTER
+def _city_in_list(haystack: str, city_list: list[str]) -> bool:
+    """Check if any normalized city from list appears in haystack."""
+    haystack_lower = haystack.lower()
+    for city in city_list:
+        norm = _normalize_city(city)
+        if norm in haystack_lower:
+            return True
+    return False
 
 
-def assess_station_proximity(listing: Listing) -> StationFilterResult:
-    """Estimate how suitable a listing is based on location keywords."""
-    if not station_filter_enabled():
-        return StationFilterResult(keep=True, score=0, reason="location filtering disabled")
-
-    haystack = " ".join(
-        [
-            listing.title or "",
-            listing.address or "",
-            listing.description[:400] if listing.description else "",
-        ]
-    ).lower()
-
-    near_hits = [keyword for keyword in STATION_NEAR_KEYWORDS if keyword in haystack]
-    far_hits = [keyword for keyword in STATION_FAR_KEYWORDS if keyword in haystack]
-
-    score = 0
-    if near_hits:
-        score += 2
-    if far_hits:
-        score -= 2
-
-    keep = score >= 0 and not far_hits
-    if near_hits:
-        return StationFilterResult(keep=keep, score=score, reason=f"near preferred location: {near_hits[0]}")
-    if far_hits:
-        return StationFilterResult(keep=False, score=score, reason=f"in excluded location: {far_hits[0]}")
-    return StationFilterResult(keep=True, score=score, reason="no location preference matches")
+def is_city_accepted(listing: Listing) -> bool:
+    """Check if a listing is in an accepted city."""
+    haystack = " ".join([
+        listing.title or "",
+        listing.address or "",
+        listing.description[:500] if listing.description else "",
+    ])
+    return _city_in_list(haystack, ACCEPT_CITIES)
 
 
-def filter_listings_for_station(listings: list[Listing]) -> list[Listing]:
-    """Keep only listings that fit the proximity preference."""
-    if not station_filter_enabled():
-        return listings
+def is_city_excluded(listing: Listing) -> bool:
+    """Check if a listing is in an excluded city."""
+    if not EXCLUDE_CITIES_FINAL:
+        return False
+    haystack = " ".join([
+        listing.title or "",
+        listing.address or "",
+        listing.description[:500] if listing.description else "",
+    ])
+    return _city_in_list(haystack, EXCLUDE_CITIES_FINAL)
 
+
+def needs_renovation(listing: Listing) -> bool:
+    """Check if listing description suggests renovation needed."""
+    from config import SKIP_RENOVATION
+    if not SKIP_RENOVATION:
+        return False
+
+    haystack = " ".join([
+        listing.title or "",
+        listing.description[:1000] if listing.description else "",
+    ]).lower()
+
+    renov_keywords = [
+        "te renoveren", "op te frissen", "renovatie", "renoveren",
+        "volledige renovatie", "dringend aan renovatie", "verouderd",
+        "achterstallig onderhoud", "grondige renovatie", "onderhoudsgevoelig",
+        "asbest", "vochtprobleem", "stabiliteitsproblemen",
+    ]
+    return any(kw in haystack for kw in renov_keywords)
+
+
+def filter_listings_by_location(listings: list[Listing]) -> list[Listing]:
+    """Filter listings: keep only accepted cities, remove excluded."""
     filtered: list[Listing] = []
+
     for listing in listings:
-        result = assess_station_proximity(listing)
-        if result.keep:
-            filtered.append(listing)
+        if not is_city_accepted(listing):
+            logger.debug(f"Skipping {listing.platform}:{listing.id} — not in accepted cities")
+            continue
+        if is_city_excluded(listing):
+            logger.debug(f"Skipping {listing.platform}:{listing.id} — in excluded city")
+            continue
+        if needs_renovation(listing):
+            logger.debug(f"Skipping {listing.platform}:{listing.id} — needs renovation")
+            continue
+        filtered.append(listing)
+
+    logger.info(f"Location filter: kept {len(filtered)}/{len(listings)} listings")
     return filtered

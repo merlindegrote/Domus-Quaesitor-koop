@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Apartment Hunter orchestrator.
+Huizenjacht (House Hunter) orchestrator.
 
 Daily mode:
-- scrape listings
+- scrape listings from Immoweb, Zimmo, Immoscoop
 - deduplicate against previously emailed listings
-- score and email new listings
-- on Fridays, also send a weekly top-10 summary
+- score (text + photos) and email new listings
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from email_sender.digest import send_digest, send_weekly_digest
-from location_filter import assess_station_proximity, filter_listings_for_station
+from location_filter import needs_renovation, filter_listings_by_location
 from scoring.photo_scorer import PhotoScorer, compute_final_scores
 from scoring.text_scorer import TextScorer
 from scrapers import ImmowebScraper, ImmoscoopScraper, Listing, ZimmoScraper
@@ -75,13 +74,7 @@ def deduplicate(
     sent_unique_keys: set[str],
     sent_fingerprints: set[str],
 ) -> list[Listing]:
-    """
-    Keep only listings that have not been emailed before.
-
-    Duplicates are detected in two ways:
-    1. Exact platform listing ID seen in a prior email
-    2. Cross-platform fuzzy fingerprint seen in a prior email
-    """
+    """Keep only listings not emailed before."""
     new_listings: list[Listing] = []
     run_fingerprints: set[str] = set()
 
@@ -90,22 +83,20 @@ def deduplicate(
         fingerprint = listing_fingerprint(listing)
 
         if unique_key in sent_unique_keys:
-            logger.debug("Skipping previously emailed listing id: %s", unique_key)
+            logger.debug("Skipping previously emailed id: %s", unique_key)
             continue
-
         if fingerprint in sent_fingerprints:
             logger.debug("Skipping previously emailed fingerprint: %s", fingerprint)
             continue
-
         if fingerprint in run_fingerprints:
-            logger.debug("Skipping same-run duplicate fingerprint: %s", fingerprint)
+            logger.debug("Skipping same-run duplicate: %s", fingerprint)
             continue
 
         run_fingerprints.add(fingerprint)
         new_listings.append(listing)
 
     logger.info(
-        "New listings after deduplication: %s (filtered %s duplicates/previously emailed)",
+        "New after dedup: %s (filtered %s dupes)",
         len(new_listings),
         len(listings) - len(new_listings),
     )
@@ -114,6 +105,8 @@ def deduplicate(
 
 def enrich_listings(listings: list[Listing]) -> list[Listing]:
     """Enrich listings with full descriptions from detail pages."""
+    from config import ACCEPT_CITIES
+
     scrapers = {
         "immoweb": ImmowebScraper(),
         "zimmo": ZimmoScraper(),
@@ -141,7 +134,7 @@ def score_listings(listings: list[Listing]) -> list[Listing]:
         photo_scorer = PhotoScorer()
         listings = photo_scorer.score_listings(listings)
     else:
-        logger.info("\nPhoto scoring disabled by configuration")
+        logger.info("\nPhoto scoring disabled")
 
     return compute_final_scores(listings)
 
@@ -156,16 +149,12 @@ def log_ranked_results(listings: list[Listing], heading: str) -> None:
         logger.info("No listings to show")
         return
 
-    for index, listing in enumerate(listings, start=1):
+    for i, listing in enumerate(listings, 1):
         score_str = f"{listing.final_score:.1f}" if listing.final_score is not None else "-"
         logger.info(
-            "#%s [%s/10] %s - EUR %s/mo - %s (%s)",
-            index,
-            score_str,
-            listing.title,
-            listing.price,
-            listing.address,
-            listing.platform,
+            "#%s [%s/10] %s - EUR %s - %s (%s)",
+            i, score_str, listing.title, listing.price,
+            listing.address, listing.platform,
         )
         if listing.score_reasoning:
             logger.info("    %s", listing.score_reasoning)
@@ -192,10 +181,9 @@ def maybe_send_weekly_digest(
     dry_run: bool,
     scrape_only: bool,
 ) -> None:
-    """Send the Friday weekly digest once per ISO week."""
+    """Send the weekly digest once per ISO week."""
     if dry_run or scrape_only:
         return
-
     if now.weekday() != 4:
         return
 
@@ -204,11 +192,11 @@ def maybe_send_weekly_digest(
         logger.info("Weekly digest already sent for %s", week_key)
         return
 
-    weekly_listings = weekly_top_listings(history, week_key, limit=10)
-    log_ranked_results(weekly_listings, f"WEEKLY TOP 10 - {week_label(week_key)}")
+    weekly = weekly_top_listings(history, week_key, limit=10)
+    log_ranked_results(weekly, f"WEEKLY TOP 10 - {week_label(week_key)}")
 
     logger.info("\nSending weekly digest...")
-    if send_weekly_digest(weekly_listings, week_label(week_key)):
+    if send_weekly_digest(weekly, week_label(week_key)):
         mark_weekly_report_sent(history, week_key)
     else:
         logger.error("Weekly digest failed")
@@ -217,75 +205,42 @@ def maybe_send_weekly_digest(
 def run_weekly_only(history: dict, now: datetime, dry_run: bool) -> None:
     """Send or preview the weekly digest without scraping."""
     week_key = iso_week_key(now)
-    weekly_listings = weekly_top_listings(history, week_key, limit=10)
-    log_ranked_results(weekly_listings, f"WEEKLY TOP 10 - {week_label(week_key)}")
-
+    weekly = weekly_top_listings(history, week_key, limit=10)
+    log_ranked_results(weekly, f"WEEKLY TOP 10 - {week_label(week_key)}")
     if dry_run:
         logger.info("\nDry run - skipping weekly email")
         return
-
     if weekly_report_already_sent(history, week_key):
         logger.info("Weekly digest already sent for %s", week_key)
         return
-
     logger.info("\nSending weekly digest...")
-    if send_weekly_digest(weekly_listings, week_label(week_key)):
+    if send_weekly_digest(weekly, week_label(week_key)):
         mark_weekly_report_sent(history, week_key)
     else:
         logger.error("Weekly digest failed")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Apartment Hunter - Ghent rental finder")
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Scrape and score but do not send email",
-    )
-    parser.add_argument(
-        "--scrape-only",
-        action="store_true",
-        help="Only scrape listings; skip scoring and email",
-    )
-    parser.add_argument(
-        "--weekly-only",
-        action="store_true",
-        help="Skip scraping and send only the weekly top-10 summary",
-    )
-    parser.add_argument(
-        "--test-email",
-        action="store_true",
-        help="Send a minimal test email without scraping",
-    )
+    parser = argparse.ArgumentParser(description="Huizenjacht - house finder")
+    parser.add_argument("--dry-run", action="store_true", help="Scrape/score but no email")
+    parser.add_argument("--scrape-only", action="store_true", help="Only scrape, skip scoring/email")
+    parser.add_argument("--weekly-only", action="store_true", help="Skip scraping, send weekly summary")
+    parser.add_argument("--test-email", action="store_true", help="Send a test email without scraping")
     args = parser.parse_args()
 
     start_time = datetime.now()
-    logger.info("Apartment Hunter starting...")
+    logger.info("Huizenjacht starting...")
     logger.info("Timestamp: %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
-    logger.info(
-        "Mode: %s",
-        "test-email"
-        if args.test_email
-        else "weekly-only"
-        if args.weekly_only
-        else "dry-run"
-        if args.dry_run
-        else "scrape-only"
-        if args.scrape_only
-        else "full",
-    )
+    logger.info("Mode: %s", "test-email" if args.test_email else "weekly-only" if args.weekly_only else "dry-run" if args.dry_run else "scrape-only" if args.scrape_only else "full")
 
     seen_ids = load_seen_ids(SEEN_FILE)
     history = load_history(HISTORY_FILE)
-    sent_unique_keys, sent_fingerprints = build_sent_index(history, seen_ids)
-    logger.info("Previously emailed listings: %s ids, %s fingerprints", len(sent_unique_keys), len(sent_fingerprints))
+    sent_keys, sent_fps = build_sent_index(history, seen_ids)
+    logger.info("Previously emailed: %s ids, %s fingerprints", len(sent_keys), len(sent_fps))
 
     if args.test_email:
-        logger.info("Sending minimal test email...")
-        if send_digest([]):
-            logger.info("Test email sent successfully")
-        else:
-            logger.error("Test email failed")
+        logger.info("Sending test email...")
+        send_digest([])
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info("\nDone in %.1fs", elapsed)
         return
@@ -298,58 +253,43 @@ def main() -> None:
         return
 
     all_listings = scrape_all()
-    new_listings = deduplicate(all_listings, sent_unique_keys, sent_fingerprints)
+
+    # Filter by location + renovation check
+    all_listings = [l for l in all_listings if not needs_renovation(l)]
+
+    new_listings = deduplicate(all_listings, sent_keys, sent_fps)
 
     if new_listings:
         logger.info("\nEnriching listings...")
         new_listings = enrich_listings(new_listings)
-        before_station_filter = len(new_listings)
-        new_listings = filter_listings_for_station(new_listings)
-        if len(new_listings) != before_station_filter:
-            logger.info(
-                "Proximity filter kept %s/%s listings",
-                len(new_listings),
-                before_station_filter,
-            )
+
+        # Apply location filter (city accept/exclude)
+        before_filter = len(new_listings)
+        new_listings = filter_listings_by_location(new_listings)
+        logger.info("Location filter: kept %s/%s", len(new_listings), before_filter)
 
         if not args.scrape_only:
             new_listings = score_listings(new_listings)
 
-        from config import ENABLE_STATION_FILTER
-        if ENABLE_STATION_FILTER:
-            for listing in new_listings:
-                station_result = assess_station_proximity(listing)
-                if listing.score_reasoning:
-                    listing.score_reasoning = f"{listing.score_reasoning} | {station_result.reason}"
-                else:
-                    listing.score_reasoning = station_result.reason
-
         log_ranked_results(new_listings, f"DAILY RESULTS - {len(new_listings)} new listings ranked")
     else:
-        logger.info("No new listings after deduplication")
+        logger.info("No new listings after dedup")
 
     daily_email_sent = False
     if not args.dry_run and not args.scrape_only:
         logger.info("\nSending daily digest...")
         daily_email_sent = send_digest(new_listings)
-        if not daily_email_sent:
-            logger.error("Daily digest failed")
     elif args.dry_run:
         logger.info("\nDry run - skipping email")
     else:
-        logger.info("\nScrape-only mode - skipping scoring and email")
+        logger.info("\nScrape-only - skipping email")
 
     if not args.dry_run and not args.scrape_only:
         persist_new_listings(history, seen_ids, new_listings, start_time, daily_email_sent)
         save_history(HISTORY_FILE, history)
         save_seen_ids(SEEN_FILE, seen_ids)
 
-    maybe_send_weekly_digest(
-        history,
-        now=start_time,
-        dry_run=args.dry_run,
-        scrape_only=args.scrape_only,
-    )
+    maybe_send_weekly_digest(history, now=start_time, dry_run=args.dry_run, scrape_only=args.scrape_only)
     if not args.dry_run and not args.scrape_only:
         save_history(HISTORY_FILE, history)
 

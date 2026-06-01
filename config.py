@@ -1,4 +1,4 @@
-"""Central configuration module for Apartment Hunter."""
+"""Central configuration module for Domus-Quaesitor (koop)."""
 
 import os
 from pathlib import Path
@@ -6,49 +6,64 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Search settings
-TARGET_CITY = os.environ.get("TARGET_CITY", "gent").strip()
-TARGET_POSTAL_CODE = os.environ.get("TARGET_POSTAL_CODE", "9000").strip()
+# Transaction type
+TRANSACTION_TYPE = "for-sale"
+PROPERTY_TYPE = "house"
+
+# Search settings — accept only these cities
+TARGET_CITIES = ["Geel", "Lier", "Ranst", "Broechem", "Emblem", "Vremde", "Wommelgem", "Kessel"]
+TARGET_POSTALS = ["2440", "2500", "2520", "2531", "2160", "2560"]
+
+# Cities/postals to exclude (even if they match postals)
+EXCLUDE_CITIES = ["Koningshooikt", "Oelegem", "Nijlen", "Bevel"]
+
+# Fallback for single-city operations
+TARGET_CITY = os.environ.get("TARGET_CITY", "Geel").strip()
+TARGET_POSTAL_CODE = os.environ.get("TARGET_POSTAL_CODE", "2440").strip()
 
 try:
-    MIN_PRICE = int(os.environ.get("MIN_PRICE", "800"))
+    MIN_PRICE = int(os.environ.get("MIN_PRICE", "400000"))
 except ValueError:
-    MIN_PRICE = 800
+    MIN_PRICE = 400000
 
 try:
-    MAX_PRICE = int(os.environ.get("MAX_PRICE", "1000"))
+    MAX_PRICE = int(os.environ.get("MAX_PRICE", "700000"))
 except ValueError:
-    MAX_PRICE = 1000
+    MAX_PRICE = 700000
 
 try:
-    MIN_BEDROOMS = int(os.environ.get("MIN_BEDROOMS", "1"))
+    MIN_BEDROOMS = int(os.environ.get("MIN_BEDROOMS", "3"))
 except ValueError:
-    MIN_BEDROOMS = 1
+    MIN_BEDROOMS = 3
 
-# Proximity/Station Filter settings
-ENABLE_STATION_FILTER = os.environ.get("ENABLE_STATION_FILTER", "false").lower() in {"1", "true", "yes", "on"}
+# EPC labels to accept (energy performance)
+EPC_ALLOWED = ["A", "A+", "A++", "B", "C"]
 
-# Parse station/proximity keywords
-DEFAULT_NEAR = [
-    "gent-sint-pieters", "sint-pieters", "stationsbuurt", "st pieters",
-    "koningin elisabethlaan", "prinses clementinalaan", "clementinalaan",
-    "kortrijksesteenweg", "smidsestraat", "aannemersstraat", "vasco da gamastraat",
-    "patijntjesstraat", "zwijnaardsesteenweg", "voskenslaan", "sint-denijslaan"
-]
+# Minimum surface areas (m²)
+try:
+    MIN_LIVING_SURFACE = int(os.environ.get("MIN_LIVING_SURFACE", "115"))
+except ValueError:
+    MIN_LIVING_SURFACE = 115
 
-DEFAULT_FAR = [
-    "dampoort", "muide", "wondelgem", "oostakker", "mariakerke", "sint-amandsberg",
-    "gentbrugge", "moscou", "rabat", "rabot", "bloemekenswijk", "dok noord",
-    "blaisantvest", "oslostraat", "blankenbergestraat", "hofstraat", "komijnstraat",
-    "begijnhoflaan", "steenakker", "kasteellaan", "francisco ferrerlaan"
-]
+try:
+    MIN_LOT_SURFACE = int(os.environ.get("MIN_LOT_SURFACE", "450"))
+except ValueError:
+    MIN_LOT_SURFACE = 450
 
-near_raw = os.environ.get("STATION_NEAR_KEYWORDS", "")
-STATION_NEAR_KEYWORDS = [
-    k.strip().lower() for k in near_raw.split(",") if k.strip()
-] if near_raw else DEFAULT_NEAR
+# Skip listings that mention renovation
+SKIP_RENOVATION = os.environ.get("SKIP_RENOVATION", "true").lower() in {"1", "true", "yes", "on"}
 
-far_raw = os.environ.get("STATION_FAR_KEYWORDS", "")
-STATION_FAR_KEYWORDS = [
-    k.strip().lower() for k in far_raw.split(",") if k.strip()
-] if far_raw else DEFAULT_FAR
+# City acceptance/exclusion filter
+CITY_ACCEPT_LIST = os.environ.get("CITY_ACCEPT_LIST", "")
+CITY_EXCLUDE_LIST = os.environ.get("CITY_EXCLUDE_LIST", "")
+
+# Parse from env or use defaults
+if CITY_ACCEPT_LIST:
+    ACCEPT_CITIES = [c.strip() for c in CITY_ACCEPT_LIST.split(",") if c.strip()]
+else:
+    ACCEPT_CITIES = TARGET_CITIES[:]
+
+if CITY_EXCLUDE_LIST:
+    EXCLUDE_CITIES_FINAL = [c.strip() for c in CITY_EXCLUDE_LIST.split(",") if c.strip()]
+else:
+    EXCLUDE_CITIES_FINAL = EXCLUDE_CITIES[:]

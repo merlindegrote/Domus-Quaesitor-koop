@@ -40,6 +40,7 @@ class Listing:
     image_urls: list[str] = field(default_factory=list)
     epc_label: Optional[str] = None   # energy label if available
     surface_m2: Optional[int] = None
+    lot_surface_m2: Optional[int] = None
     posted_date: Optional[str] = None
 
     # Scoring fields (populated later)
@@ -67,6 +68,7 @@ class Listing:
             "image_urls": self.image_urls[:5],
             "epc_label": self.epc_label,
             "surface_m2": self.surface_m2,
+            "lot_surface_m2": self.lot_surface_m2,
             "posted_date": self.posted_date,
             "text_score": self.text_score,
             "photo_score": self.photo_score,
