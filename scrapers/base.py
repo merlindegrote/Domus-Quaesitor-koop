@@ -87,7 +87,7 @@ class BaseScraper(ABC):
     def __init__(self):
         self._last_request_time: float = 0
 
-    def _rate_limited_get(self, url: str, **kwargs) -> requests.Response:
+    def _rate_limited_get(self, url: str, timeout: int = 30, **kwargs) -> requests.Response:
         """Make a rate-limited GET request using curl_cffi with TLS impersonation.
 
         curl_cffi mimics a real browser's TLS fingerprint, which is the primary
@@ -107,7 +107,7 @@ class BaseScraper(ABC):
         response = curl_requests.get(
             url,
             impersonate=browser,
-            timeout=30,
+            timeout=timeout,
             headers={
                 "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
             },
