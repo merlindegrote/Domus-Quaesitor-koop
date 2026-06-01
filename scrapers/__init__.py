@@ -3,5 +3,10 @@ from scrapers.immoweb import ImmowebScraper
 from scrapers.zimmo import ZimmoScraper
 from scrapers.immoscoop import ImmoscoopScraper
 from scrapers.immovlan import ImmovlanScraper
+from scrapers.tweedehands import TweeDeHandsScraper
 
-__all__ = ["Listing", "BaseScraper", "ImmowebScraper", "ZimmoScraper", "ImmoscoopScraper", "ImmovlanScraper"]
+__all__ = [
+    "Listing", "BaseScraper",
+    "ImmowebScraper", "ZimmoScraper", "ImmoscoopScraper",
+    "ImmovlanScraper", "TweeDeHandsScraper",
+]

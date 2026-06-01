@@ -23,7 +23,7 @@ from email_sender.digest import send_digest, send_weekly_digest
 from location_filter import needs_renovation, filter_listings_by_location
 from scoring.photo_scorer import PhotoScorer, compute_final_scores
 from scoring.text_scorer import TextScorer
-from scrapers import ImmowebScraper, ImmovlanScraper, ImmoscoopScraper, Listing, ZimmoScraper
+from scrapers import ImmowebScraper, ImmovlanScraper, ImmoscoopScraper, Listing, TweeDeHandsScraper, ZimmoScraper
 from storage import (
     build_sent_index,
     iso_week_key,
@@ -56,7 +56,7 @@ HISTORY_FILE = DATA_DIR / "listing_history.json"
 
 def scrape_all() -> list[Listing]:
     """Run all scrapers and collect listings."""
-    scrapers = [ImmowebScraper(), ZimmoScraper(), ImmoscoopScraper(), ImmovlanScraper()]
+    scrapers = [ImmowebScraper(), ZimmoScraper(), ImmoscoopScraper(), ImmovlanScraper(), TweeDeHandsScraper()]
     all_listings: list[Listing] = []
 
     for scraper in scrapers:
@@ -112,6 +112,7 @@ def enrich_listings(listings: list[Listing]) -> list[Listing]:
         "zimmo": ZimmoScraper(),
         "immoscoop": ImmoscoopScraper(),
         "immovlan": ImmovlanScraper(),
+        "tweedehands": TweeDeHandsScraper(),
     }
 
     for listing in listings:
