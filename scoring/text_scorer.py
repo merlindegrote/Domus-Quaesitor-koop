@@ -1,4 +1,4 @@
-"""AI text scoring using OpenRouter (DeepSeek Chat) for 'modern & clean' house vibes."""
+"""AI text scoring using DeepSeek Chat (direct API) for 'modern & clean' house vibes."""
 
 from __future__ import annotations
 
@@ -17,9 +17,10 @@ DEFAULT_REASONING = "AI scoring unavailable — unranked"
 
 
 class TextScorer:
-    """Score listing descriptions for modern/clean vibes using OpenRouter DeepSeek."""
+    """Score listing descriptions for modern/clean vibes using DeepSeek directly."""
 
-    MODEL = "deepseek/deepseek-chat"
+    MODEL = "deepseek-chat"
+    BASE_URL = "https://api.deepseek.com/v1"
     MAX_RETRIES = 2
     RETRY_DELAY = 5  # seconds
 
@@ -63,23 +64,23 @@ Respond with this exact JSON format:
 {{"modern_score": <number 1-10>, "reasoning": "<brief 1-2 sentence explanation>"}}"""
 
     def __init__(self):
-        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         self.client = None
 
         if self.api_key:
             try:
                 from openai import OpenAI
                 self.client = OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
+                    base_url=self.BASE_URL,
                     api_key=self.api_key,
                 )
-                logger.info("✅ OpenRouter DeepSeek text scorer initialized")
+                logger.info("✅ DeepSeek text scorer initialized")
             except ImportError:
                 logger.warning("⚠️ openai package not installed, text scoring disabled")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize OpenRouter client: {e}")
+                logger.warning(f"⚠️ Failed to initialize DeepSeek client: {e}")
         else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set, text scoring disabled")
+            logger.warning("⚠️ DEEPSEEK_API_KEY not set, text scoring disabled")
 
     @property
     def is_available(self) -> bool:
@@ -120,10 +121,6 @@ Respond with this exact JSON format:
                     ],
                     temperature=0.3,
                     max_tokens=200,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/apartment-hunter",
-                        "X-Title": "Apartment Hunter",
-                    },
                 )
 
                 content = response.choices[0].message.content

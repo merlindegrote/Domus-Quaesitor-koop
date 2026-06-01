@@ -1,10 +1,11 @@
-"""AI photo scoring using OpenRouter free vision model for house quality."""
+"""AI photo scoring using Google Gemini (vision model) for house quality."""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
+import re
 import time
 
 from scrapers.base import Listing
@@ -15,9 +16,9 @@ DEFAULT_SCORE = 5.0
 
 
 class PhotoScorer:
-    """Score listing photos for house quality using OpenRouter vision models."""
+    """Score listing photos for house quality using Gemini vision."""
 
-    MODEL = "openrouter/free"
+    MODEL = "gemini-2.0-flash"
     MAX_PHOTOS = 3
     MAX_RETRIES = 2
     RETRY_DELAY = 3
@@ -39,23 +40,20 @@ Respond with this exact JSON format:
 {"photo_score": <number 1-10>, "reasoning": "<brief observation>"}"""
 
     def __init__(self):
-        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.api_key = os.environ.get("GEMINI_API_KEY", "")
         self.client = None
 
         if self.api_key:
             try:
-                from openai import OpenAI
-                self.client = OpenAI(
-                    base_url="https://openrouter.ai/api/v1",
-                    api_key=self.api_key,
-                )
-                logger.info("✅ OpenRouter client initialized")
+                from google import genai
+                self.client = genai.Client(api_key=self.api_key)
+                logger.info("✅ Gemini photo scorer initialized")
             except ImportError:
-                logger.warning("⚠️ openai package not installed, photo scoring disabled")
+                logger.warning("⚠️ google-genai package not installed, photo scoring disabled")
             except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize OpenRouter client: {e}")
+                logger.warning(f"⚠️ Failed to initialize Gemini client: {e}")
         else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set, photo scoring disabled")
+            logger.warning("⚠️ GEMINI_API_KEY not set, photo scoring disabled")
 
     @property
     def is_available(self) -> bool:
@@ -74,60 +72,50 @@ Respond with this exact JSON format:
             logger.debug(f"[photo_scorer] No valid images for {listing.platform}:{listing.id}")
             return None
 
-        content = [{"type": "text", "text": self.USER_PROMPT}]
-        for url in image_urls:
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": url}
-            })
-
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                response = self.client.chat.completions.create(
+                from google.genai import types
+
+                parts = [types.Part.from_text(text=self.SYSTEM_PROMPT),
+                         types.Part.from_text(text=self.USER_PROMPT)]
+
+                for url in image_urls:
+                    img_data = self._fetch_image(url)
+                    parts.append(
+                        types.Part.from_bytes(data=img_data, mime_type="image/jpeg")
+                    )
+
+                response = self.client.models.generate_content(
                     model=self.MODEL,
-                    messages=[
-                        {"role": "system", "content": self.SYSTEM_PROMPT},
-                        {"role": "user", "content": content},
-                    ],
-                    max_tokens=200,
-                    temperature=0.3,
-                    extra_headers={
-                        "HTTP-Referer": "https://github.com/merlindegrote/Domus-Quaesitor-koop",
-                        "X-Title": "House Hunter",
-                    },
+                    contents=parts,
+                    config=types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=200,
+                    )
                 )
 
-                choice = response.choices[0].message
-                result_text = choice.content if choice else None
-                if not result_text:
-                    logger.warning("[photo_scorer] Empty response for %s:%s", listing.platform, listing.id)
-                    return None
-
-                result = self._extract_json(result_text)
+                result = self._extract_json(response.text)
                 if result:
                     score = float(result.get("photo_score", DEFAULT_SCORE))
                     score = max(1.0, min(10.0, score))
                     logger.debug(f"[photo_scorer] {listing.platform}:{listing.id} -> {score:.1f}/10")
                     return score
 
-                logger.warning(f"[photo_scorer] Could not parse: {result_text[:200]}")
-                return None
+                logger.warning(f"[photo_scorer] Could not parse: {response.text[:200]}")
+                return DEFAULT_SCORE
 
             except Exception as e:
                 error_str = str(e).lower()
-                if "rate_limit" in error_str or "429" in error_str or "quota" in error_str:
-                    logger.warning(f"[photo_scorer] Rate limited (attempt {attempt + 1}/{self.MAX_RETRIES + 1})")
+                if any(x in error_str for x in ["rate_limit", "429", "quota", "safety", "blocked"]):
+                    logger.warning(f"[photo_scorer] Provider issue (attempt {attempt + 1}/{self.MAX_RETRIES + 1}): {e}")
                     if attempt < self.MAX_RETRIES:
                         time.sleep(self.RETRY_DELAY * (attempt + 1))
                         continue
                     return None
-                if "developer instruction is not enabled" in error_str:
-                    logger.warning("[photo_scorer] Provider rejected system prompt")
-                    return None
-                if "no endpoints found that support image input" in error_str:
-                    logger.warning("[photo_scorer] No vision-capable provider")
-                    return None
                 logger.warning(f"[photo_scorer] Failed: {e}")
+                if attempt < self.MAX_RETRIES:
+                    time.sleep(self.RETRY_DELAY)
+                    continue
                 return None
 
         return None
@@ -151,10 +139,23 @@ Respond with this exact JSON format:
             if i < len(listings) - 1:
                 time.sleep(3)
 
-            logger.info(f"[photo_scorer] ({i + 1}/{len(listings)}) {listing.platform}:{listing.id} -> {'%.1f/10' % score if score else 'skipped'}")
+            logger.info(
+                f"[photo_scorer] ({i + 1}/{len(listings)}) {listing.platform}:{listing.id} -> "
+                f"{'%.1f/10' % score if score else 'skipped'}"
+            )
 
         logger.info(f"[photo_scorer] Scored {scored}/{len(listings)}")
         return listings
+
+    @staticmethod
+    def _fetch_image(url: str) -> bytes:
+        """Fetch image bytes from URL."""
+        import requests
+        resp = requests.get(url, timeout=15, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        resp.raise_for_status()
+        return resp.content
 
     @staticmethod
     def _extract_json(text: str) -> dict | None:
@@ -162,7 +163,6 @@ Respond with this exact JSON format:
             return json.loads(text)
         except json.JSONDecodeError:
             pass
-        import re
         match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', text)
         if match:
             try:
