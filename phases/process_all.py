@@ -505,6 +505,13 @@ def main():
     scored = [(ld.get("final_score", 5.0), ld) for _, ld in scored]
     scored.sort(key=lambda x: x[0], reverse=True)
     
+    # Filter: alleen listings met score > 5.0
+    before_filter = len(scored)
+    scored = [(s, ld) for s, ld in scored if s > 5.0]
+    filtered_low = before_filter - len(scored)
+    if filtered_low:
+        print(f"⏬ {filtered_low} listings uitgefilterd (score ≤ 5.0)")
+    
     print(f"\n📊 Scoring voltooid — top 5:")
     for score, ld in scored[:5]:
         title = ld.get("title", "?")[:60]
