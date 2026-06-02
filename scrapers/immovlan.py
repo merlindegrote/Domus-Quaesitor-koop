@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # Meta description format (AFTER HTML unescaping):
 # "Huis te koop | [address] | [price] € | Bewoonbare opp. [surface]m² | EPC [label] | [bedrooms] Slaapkamers"
 _META_RE = re.compile(
-    r"(?:Huis|Appartement)\s+te\s+koop"
+    r"Huis\s+te\s+koop"
     r"\s*\|\s*(?P<address>[^|]+)"
     r"\s*\|\s*(?P<price>[\d.,\u202f\s]+)\s*\u20ac"
     r"\s*\|\s*Bewoonbare opp\.?\s*(?P<surface>[\d.]+)\s*m[²2\u00b2]?\s*"
@@ -169,6 +169,11 @@ class ImmovlanScraper(BaseScraper):
         """Parse the meta description tag for structured property data."""
         # HTML entities (&#x27;, &#x202F;, etc.) break regex matching
         meta_content = _html_unescape(meta_content)
+
+        # Skip appartments
+        if "Appartement" in meta_content:
+            return None
+
         m = _META_RE.search(meta_content)
         if not m:
             return None
@@ -226,6 +231,13 @@ class ImmovlanScraper(BaseScraper):
         self, html: str, prop_id: str, final_url: str
     ) -> Listing | None:
         """Parse JSON-LD blocks for House + SellAction data."""
+        # Skip if meta description says Appartement
+        raw_meta = _RAW_META_RE.search(html)
+        if raw_meta:
+            meta_content = _html_unescape(raw_meta.group(1))
+            if "Appartement" in meta_content:
+                return None
+
         # Unescape HTML entities for JSON parsing
         clean = (
             html.replace("&#x202F;", " ")
@@ -260,6 +272,10 @@ class ImmovlanScraper(BaseScraper):
             return None
 
         desc = house_data.get("description", "")
+
+        # Skip appartments
+        if "Appartement" in desc or "Appartement" in house_data.get("name", ""):
+            return None
 
         # Bedrooms from description
         bedrooms = MIN_BEDROOMS
@@ -315,6 +331,10 @@ class ImmovlanScraper(BaseScraper):
         """Minimal HTML fallback — should rarely trigger."""
         soup = BeautifulSoup(html, "lxml")
         text = soup.get_text(" ", strip=True)
+
+        # Skip appartments
+        if "Appartement" in text:
+            return None
 
         meta_desc = soup.select_one('meta[name="description"]')
         description = meta_desc.get("content", "") if meta_desc else ""
@@ -445,7 +465,20 @@ class ImmovlanScraper(BaseScraper):
         return 0
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        """Detail data already obtained."""
+        """Fetch detail page for og:image."""
+        try:
+            response = self._rate_limited_get(listing.url, timeout=15)
+            if response and response.text:
+                # Check og:image
+                m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', response.text)
+                if m:
+                    listing.image_urls = [m.group(1)]
+                # Fallback: check other images
+                if not listing.image_urls:
+                    imgs = re.findall(r'<img[^>]+src="([^"]+)"', response.text)
+                    listing.image_urls = [img for img in imgs if img.startswith("http")][:5]
+        except Exception as e:
+            logging.debug(f"[immovlan] enrich failed {listing.id}: {e}")
         return listing
 
 

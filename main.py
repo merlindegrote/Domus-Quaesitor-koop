@@ -259,6 +259,11 @@ def main() -> None:
     # Filter by location + renovation check
     all_listings = [l for l in all_listings if not needs_renovation(l)]
 
+    # Backstop: filter out anything that's not a house
+    before = len(all_listings)
+    all_listings = [l for l in all_listings if l.property_type == "house"]
+    logger.info("Property type filter: kept %s/%s listings (houses only)", len(all_listings), before)
+
     new_listings = deduplicate(all_listings, sent_keys, sent_fps)
 
     if new_listings:

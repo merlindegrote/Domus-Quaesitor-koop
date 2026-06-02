@@ -57,6 +57,7 @@ class ZimmoScraper(BaseScraper):
         if json_listings:
             return json_listings
 
+        listings = []
         cards = soup.select(
             ".property-item, [class*='property-card'], "
             "[class*='search-result'], article[class*='result'], .card-property"
@@ -83,6 +84,9 @@ class ZimmoScraper(BaseScraper):
         for link in soup.find_all("a", href=True):
             title_text = link.get_text(" ", strip=True)
             if "Huis te koop" not in title_text:
+                continue
+            # Skip appartments
+            if "Appartement" in title_text:
                 continue
             href = link.get("href", "")
             if not href:
@@ -220,6 +224,16 @@ class ZimmoScraper(BaseScraper):
     def _parse_jsonld_item(self, item: dict) -> Listing | None:
         try:
             actual = item.get("item", item)
+
+            # Check for type or name indicating apartment
+            name = actual.get("name", "")
+            description = actual.get("description", "")
+            type_val = actual.get("@type", "")
+            if "Appartement" in name or "Appartement" in description:
+                return None
+            if isinstance(type_val, str) and "Appartement" in type_val:
+                return None
+
             url = actual.get("url", "")
             listing_id = self._extract_id_from_url(url)
             if not listing_id:
@@ -247,6 +261,11 @@ class ZimmoScraper(BaseScraper):
 
     def _parse_json_item(self, item: dict) -> Listing | None:
         try:
+            # Skip appartments
+            title_val = item.get("title", item.get("name", ""))
+            if "Appartement" in title_val:
+                return None
+
             listing_id = str(item.get("id", ""))
             if not listing_id:
                 return None
@@ -285,6 +304,11 @@ class ZimmoScraper(BaseScraper):
 
     def _parse_html_card(self, card: BeautifulSoup, page_soup: BeautifulSoup) -> Listing | None:
         try:
+            # Skip appartments
+            card_text = card.get_text(" ", strip=True)
+            if "Appartement" in card_text:
+                return None
+
             link = card.find("a", href=True)
             if not link:
                 return None

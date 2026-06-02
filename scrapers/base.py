@@ -42,6 +42,7 @@ class Listing:
     surface_m2: Optional[int] = None
     lot_surface_m2: Optional[int] = None
     posted_date: Optional[str] = None
+    property_type: str = "house"
 
     # Scoring fields (populated later)
     text_score: Optional[float] = None
@@ -70,6 +71,7 @@ class Listing:
             "surface_m2": self.surface_m2,
             "lot_surface_m2": self.lot_surface_m2,
             "posted_date": self.posted_date,
+            "property_type": self.property_type,
             "text_score": self.text_score,
             "photo_score": self.photo_score,
             "final_score": self.final_score,

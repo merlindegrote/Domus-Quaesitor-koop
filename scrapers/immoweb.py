@@ -92,6 +92,13 @@ class ImmowebScraper(BaseScraper):
             if not listing_id:
                 return None
 
+            # Skip if not a house
+            prop = item.get("property", {})
+            if isinstance(prop, dict):
+                prop_type = prop.get("type", "") or item.get("type", "")
+                if prop_type and prop_type.upper() != "HOUSE":
+                    return None
+
             # Price
             price_data = item.get("price", {})
             price = 0
