@@ -469,24 +469,29 @@ class ImmovlanScraper(BaseScraper):
         return 0
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        """Fetch detail page for og:image."""
-        # Skip appartments
-        if "appartement" in listing.title.lower():
+        """Fetch detail page and extract images via og:image and gallery images."""
+        if listing.image_urls:
             return listing
-
         try:
-            response = self._rate_limited_get(listing.url, timeout=15)
-            if response and response.text:
-                # Check og:image
-                m = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', response.text)
-                if m:
-                    listing.image_urls = [m.group(1)]
-                # Fallback: check other images
-                if not listing.image_urls:
-                    imgs = re.findall(r'<img[^>]+src="([^"]+)"', response.text)
-                    listing.image_urls = [img for img in imgs if img.startswith("http")][:5]
-        except Exception as e:
-            logging.debug(f"[immovlan] enrich failed {listing.id}: {e}")
+            resp = self._get_with_fallback(listing.url, timeout=15)
+            if not resp:
+                return listing
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            og = soup.find("meta", property="og:image")
+            if og and og.get("content"):
+                listing.image_urls = [og["content"]]
+                return listing
+
+            imgs = soup.find_all("img", class_=re.compile("photo|image|gallery|slide"))
+            seen = set()
+            for img in imgs[:8]:
+                src = img.get("src") or img.get("data-src") or img.get("data-lazy")
+                if src and src.startswith("http") and src not in seen:
+                    listing.image_urls.append(src)
+                    seen.add(src)
+        except Exception:
+            pass
         return listing
 
 
