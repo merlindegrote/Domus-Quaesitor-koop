@@ -1,4 +1,4 @@
-"""AI photo scoring using Google Gemini (vision model) for house quality."""
+"""AI photo scoring using OpenRouter (Gemini 3.5 Flash vision) for house quality."""
 
 from __future__ import annotations
 
@@ -14,16 +14,18 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SCORE = 5.0
 
+OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions"
+
 
 class PhotoScorer:
-    """Score listing photos for house quality using Gemini vision."""
+    """Score listing photos for house quality via OpenRouter + Gemini 3.5 Flash."""
 
-    MODEL = "gemini-2.0-flash"
+    MODEL = "google/gemini-3.5-flash"
     MAX_PHOTOS = 3
     MAX_RETRIES = 2
     RETRY_DELAY = 3
 
-    SYSTEM_PROMPT = """You are a real estate quality analyst. You rate house photos for quality, modernity and curb appeal.
+    PROMPT = """Rate the quality and condition of this house on a scale of 1-10.
 
 Scoring criteria (1-10):
 - 9-10: Excellent condition, modern finishes, spacious, well-maintained
@@ -32,32 +34,22 @@ Scoring criteria (1-10):
 - 3-4: Dated interior/exterior, needs work, basic quality
 - 1-2: Very old, poor condition, needs full renovation
 
-You MUST respond with valid JSON only."""
-
-    USER_PROMPT = """Rate the quality and condition of this house on a scale of 1-10.
-
-Respond with this exact JSON format:
-{"photo_score": <number 1-10>, "reasoning": "<brief observation>"}"""
+Respond with ONLY valid JSON, no markdown:
+{"photo_score": <number 1-10>, "reasoning": "<brief observation in Dutch>"}"""
 
     def __init__(self):
-        self.api_key = os.environ.get("GEMINI_API_KEY", "")
-        self.client = None
+        self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
+        self.client_available = False
 
         if self.api_key:
-            try:
-                from google import genai
-                self.client = genai.Client(api_key=self.api_key)
-                logger.info("✅ Gemini photo scorer initialized")
-            except ImportError:
-                logger.warning("⚠️ google-genai package not installed, photo scoring disabled")
-            except Exception as e:
-                logger.warning(f"⚠️ Failed to initialize Gemini client: {e}")
+            self.client_available = True
+            logger.info("✅ OpenRouter photo scorer initialized (Gemini 3.5 Flash)")
         else:
-            logger.warning("⚠️ GEMINI_API_KEY not set, photo scoring disabled")
+            logger.warning("⚠️ OPENROUTER_API_KEY not set, photo scoring disabled")
 
     @property
     def is_available(self) -> bool:
-        return self.client is not None
+        return self.client_available
 
     def score_listing(self, listing: Listing) -> float | None:
         if not self.is_available:
@@ -74,40 +66,18 @@ Respond with this exact JSON format:
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                from google.genai import types
-
-                parts = [types.Part.from_text(text=self.SYSTEM_PROMPT),
-                         types.Part.from_text(text=self.USER_PROMPT)]
-
-                for url in image_urls:
-                    img_data = self._fetch_image(url)
-                    parts.append(
-                        types.Part.from_bytes(data=img_data, mime_type="image/jpeg")
-                    )
-
-                response = self.client.models.generate_content(
-                    model=self.MODEL,
-                    contents=parts,
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        max_output_tokens=200,
-                    )
-                )
-
-                result = self._extract_json(response.text)
-                if result:
-                    score = float(result.get("photo_score", DEFAULT_SCORE))
-                    score = max(1.0, min(10.0, score))
+                score = self._call_openrouter(image_urls)
+                if score is not None:
                     logger.debug(f"[photo_scorer] {listing.platform}:{listing.id} -> {score:.1f}/10")
                     return score
 
-                logger.warning(f"[photo_scorer] Could not parse: {response.text[:200]}")
+                logger.warning(f"[photo_scorer] Could not parse response, using default")
                 return DEFAULT_SCORE
 
             except Exception as e:
                 error_str = str(e).lower()
-                if any(x in error_str for x in ["rate_limit", "429", "quota", "safety", "blocked"]):
-                    logger.warning(f"[photo_scorer] Provider issue (attempt {attempt + 1}/{self.MAX_RETRIES + 1}): {e}")
+                if any(x in error_str for x in ["rate_limit", "429", "quota", "insufficient_quota"]):
+                    logger.warning(f"[photo_scorer] Rate limit (attempt {attempt + 1}/{self.MAX_RETRIES + 1}): {e}")
                     if attempt < self.MAX_RETRIES:
                         time.sleep(self.RETRY_DELAY * (attempt + 1))
                         continue
@@ -117,6 +87,44 @@ Respond with this exact JSON format:
                     time.sleep(self.RETRY_DELAY)
                     continue
                 return None
+
+        return None
+
+    def _call_openrouter(self, image_urls: list[str]) -> float | None:
+        """Call OpenRouter API with image URLs, return photo_score."""
+        import requests
+
+        content = [{"type": "text", "text": self.PROMPT}]
+        for url in image_urls:
+            content.append({"type": "image_url", "image_url": {"url": url}})
+
+        resp = requests.post(
+            OPENROUTER_BASE,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://github.com/vkpeter/domus-quaesitor",
+            },
+            json={
+                "model": self.MODEL,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 800,
+                "temperature": 0.3,
+            },
+            timeout=30,
+        )
+
+        data = resp.json()
+
+        if "error" in data:
+            err = data["error"]
+            raise Exception(f"OpenRouter API error: {err.get('message', err)}")
+
+        text = data["choices"][0]["message"]["content"]
+        result = self._extract_json(text)
+        if result:
+            score = float(result.get("photo_score", DEFAULT_SCORE))
+            return max(1.0, min(10.0, score))
 
         return None
 
@@ -148,22 +156,17 @@ Respond with this exact JSON format:
         return listings
 
     @staticmethod
-    def _fetch_image(url: str) -> bytes:
-        """Fetch image bytes from URL."""
-        import requests
-        resp = requests.get(url, timeout=15, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        resp.raise_for_status()
-        return resp.content
-
-    @staticmethod
     def _extract_json(text: str) -> dict | None:
+        """Extract JSON from model response, stripping markdown fences."""
+        # Strip markdown code blocks first
+        cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
+        # Try direct parse
         try:
-            return json.loads(text)
+            return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
-        match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', text)
+        # Try finding first JSON object with photo_score
+        match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', cleaned)
         if match:
             try:
                 return json.loads(match.group(0))

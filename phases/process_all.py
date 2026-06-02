@@ -400,6 +400,33 @@ def main():
     
     scored.sort(key=lambda x: x[0], reverse=True)
     
+    # 5b. Photo scoring via OpenRouter + Gemini 3.5 Flash
+    print(f"\n📸 Photo scoring ({len(scored)} listings)...")
+    try:
+        from scoring.photo_scorer import PhotoScorer, compute_final_scores
+        photo_scorer = PhotoScorer()
+        if photo_scorer.is_available:
+            listing_objects = [dict_to_listing(ld) for _, ld in scored]
+            listing_objects = photo_scorer.score_listings(listing_objects)
+            # Copy photo scores back to dict
+            photo_scored_count = 0
+            for ld, listing_obj in zip([ld for _, ld in scored], listing_objects):
+                if listing_obj.photo_score is not None:
+                    ld["photo_score"] = listing_obj.photo_score
+                    photo_scored_count += 1
+                    # Update final score: text * 0.6 + photo * 0.4
+                    text = ld.get("text_score") or 5.0
+                    ld["final_score"] = round(text * 0.6 + ld["photo_score"] * 0.4, 1)
+            print(f"  📸 {photo_scored_count}/{len(scored)} listings gescoord op foto's")
+        else:
+            print(f"  ⬜ Photo scorer niet beschikbaar (OPENROUTER_API_KEY?)")
+    except Exception as e:
+        print(f"  ⚠ Photo scoring error: {e}")
+    
+    # Re-sort met photo-inclusive final scores
+    scored = [(ld.get("final_score", 5.0), ld) for _, ld in scored]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    
     print(f"\n📊 Scoring voltooid — top 5:")
     for score, ld in scored[:5]:
         title = ld.get("title", "?")[:60]
