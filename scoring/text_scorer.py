@@ -74,9 +74,12 @@ Antwoord in dit exacte JSON formaat:
         if self.api_key:
             try:
                 from openai import OpenAI
+                from openai._exceptions import Timeout as OpenAITimeout
                 self.client = OpenAI(
                     base_url=self.BASE_URL,
                     api_key=self.api_key,
+                    timeout=30.0,
+                    max_retries=0,
                 )
                 logger.info("✅ DeepSeek text scorer initialized")
             except ImportError:
