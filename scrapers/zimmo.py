@@ -349,14 +349,12 @@ class ZimmoScraper(BaseScraper):
                 return not bool(re.search(r'\d', t))
 
             if _is_generic_title(title):
-                # Format: "Klavet 14 — 2440 GEEL"
-                parts = address.split(" ", 1) if " " in address else [address, ""]
-                street_part = parts[0]
-                rest = parts[1] if len(parts) > 1 else ""
-                # Extract postcode/city uit rest
-                pc_match = re.search(r'(\d{4})\s+(.+)$', rest)
+                # Format: "Klavet 14 — GEEL" — pak alles vóór postcode
+                pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
                 if pc_match:
-                    title = f"{street_part} — {pc_match.group(2).upper()}"
+                    street_full = pc_match.group(1).strip()
+                    city = pc_match.group(3).upper()
+                    title = f"{street_full} — {city}"
                 else:
                     title = f"Te koop in {address}"
             bedrooms = self._extract_bedrooms(card)
