@@ -24,44 +24,45 @@ class TextScorer:
     MAX_RETRIES = 2
     RETRY_DELAY = 5  # seconds
 
-    SYSTEM_PROMPT = """You are a real estate quality analyzer specializing in Belgian houses for sale.
-You evaluate property listings for how MODERN and CLEAN they appear based on their description.
+    SYSTEM_PROMPT = """Je bent een vastgoedanalist die Belgische te-koop-woningen beoordeelt.
+Je evalueert hoe MODERN en AFGEWERKT een woning is op basis van de beschrijving.
 
-Your scoring criteria (1-10 scale):
-- 9-10: Clearly renovated/new build, modern finishes, contemporary design
-- 7-8: Recently updated, mostly modern, well-maintained
-- 5-6: Average, some modern elements but also dated aspects
-- 3-4: Older style, needs updating, basic finishes
-- 1-2: Very dated, poor condition, old-fashioned
+Beoordelingscriteria (1-10):
+- 9-10: Duidelijk gerenoveerd/nieuwbouw, moderne afwerking, hedendaags design
+- 7-8: Recent vernieuwd, grotendeels modern, goed onderhouden
+- 5-6: Gemiddeld, enkele moderne elementen maar ook verouderde aspecten
+- 3-4: Oudere stijl, nood aan vernieuwing, basisafwerking
+- 1-2: Zeer verouderd, slechte staat, ouderwets
 
-Key positive indicators (Dutch/Flemish):
+Positieve indicatoren:
 - "gerenoveerd", "nieuwbouw", "modern afgewerkt", "hedendaags", "recent gerenoveerd"
 - "nieuwe keuken", "inbouwtoestellen", "strakke afwerking", "design"
 - "recentelijk vernieuwd", "eigentijds", "kwalitatief", "luxueus"
-- Good EPC labels (A, B), new appliances, quality materials
-- Garden/terrace, parking/garage, good location in desirable neighbourhood
+- Goede EPC labels (A, B), nieuwe apparatuur, kwaliteitsmaterialen
+- Tuin/terras, parkeerplaats/garage, goede buurt
 
-Key negative indicators:
+Negatieve indicatoren:
 - "op te frissen", "te renoveren", "originele staat", "klassiek"
 - "oudere keuken", "verouderd", "basisafwerking"
-- Lack of parking, no outdoor space, poor EPC (D/E/F), busy road location
+- Geen parkeerplaats, geen buitenruimte, slechte EPC (D/E/F)
+- Ligging aan drukke weg
 
-You MUST respond with valid JSON only. No extra text."""
+Antwoord ALTIJD in correct Nederlands. Enkel geldige JSON, geen extra tekst."""
 
-    USER_PROMPT_TEMPLATE = """Score this property listing for modernity and cleanliness.
+    USER_PROMPT_TEMPLATE = """Beoordeel deze woning op moderniteit en afwerkingsgraad.
 
-Title: {title}
-Price: €{price}
-Address: {address}
-Surface: {surface}m²
+Titel: {title}
+Prijs: €{price}
+Adres: {address}
+Oppervlakte: {surface}m²
 EPC: {epc}
-Bedrooms: {bedrooms}
+Slaapkamers: {bedrooms}
 
-Description:
+Beschrijving:
 {description}
 
-Respond with this exact JSON format:
-{{"modern_score": <number 1-10>, "reasoning": "<brief 1-2 sentence explanation>"}}"""
+Antwoord in dit exacte JSON formaat:
+{{"modern_score": <cijfer 1-10>, "reasoning": "<korte 1-2 zinnen uitleg in het Nederlands>"}}"""
 
     def __init__(self):
         self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")

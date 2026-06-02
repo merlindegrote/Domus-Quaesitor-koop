@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import random
+import signal
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -94,6 +95,8 @@ class BaseScraper(ABC):
 
         curl_cffi mimics a real browser's TLS fingerprint, which is the primary
         signal Cloudflare and CloudFront use to detect bots.
+
+        Uses SIGALRM as a hard timeout to prevent curl_cffi from hanging indefinitely.
         """
         elapsed = time.time() - self._last_request_time
         delay = self.REQUEST_DELAY + random.uniform(0.5, 2.0)
@@ -105,18 +108,31 @@ class BaseScraper(ABC):
         logger.info(f"[{self.PLATFORM_NAME}] GET {url}")
         self._last_request_time = time.time()
 
-        browser = random.choice(_IMPERSONATE_BROWSERS)
-        response = curl_requests.get(
-            url,
-            impersonate=browser,
-            timeout=timeout,
-            headers={
-                "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
-            },
-            **kwargs,
-        )
-        response.raise_for_status()
-        return response
+        class TimeoutError(Exception):
+            pass
+
+        def _handler(_signum, _frame):
+            raise TimeoutError(f"Request timed out after {timeout + 5}s")
+
+        # Set hard alarm: timeout + 5s grace for the curl call itself
+        signal.signal(signal.SIGALRM, _handler)
+        signal.alarm(timeout + 5)
+
+        try:
+            browser = random.choice(_IMPERSONATE_BROWSERS)
+            response = curl_requests.get(
+                url,
+                impersonate=browser,
+                timeout=timeout,
+                headers={
+                    "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
+                },
+                **kwargs,
+            )
+            response.raise_for_status()
+            return response
+        finally:
+            signal.alarm(0)  # disarm
 
     def _get_with_fallback(self, url: str, **kwargs) -> requests.Response | None:
         """Fetch a URL with error handling. Returns None on failure."""

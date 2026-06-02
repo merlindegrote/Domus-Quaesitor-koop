@@ -11,6 +11,15 @@ from datetime import datetime
 from email.message import EmailMessage
 from email.policy import SMTPUTF8
 
+_NL_DAYS = ["maandag","dinsdag","woensdag","donderdag","vrijdag","zaterdag","zondag"]
+_NL_MONTHS = ["","januari","februari","maart","april","mei","juni","juli","augustus","september","oktober","november","december"]
+
+def _format_nl_date(dt: datetime) -> str:
+    """Format date to 'dinsdag 02 juni 2026'"""
+    day = _NL_DAYS[dt.weekday()]
+    month = _NL_MONTHS[dt.month]
+    return f"{day} {dt.day:02d} {month} {dt.year}"
+
 from config import EXCLUDE_CITIES_FINAL, MIN_BEDROOMS, MIN_LIVING_SURFACE, MIN_LOT_SURFACE, MIN_PRICE, MAX_PRICE
 from scrapers.base import Listing
 
@@ -93,7 +102,7 @@ def _build_listing_cards(listings: list[Listing]) -> str:
         thumbnail_html = ""
         if listing.image_urls:
             image_url = listing.image_urls[0]
-            if image_url and image_url.startswith("http"):
+            if image_url and (image_url.startswith("http") or image_url.startswith("data:")):
                 thumbnail_html = (
                     f'<img src="{html.escape(image_url)}" alt="Listing photo" '
                     f'style="width:100%;max-width:280px;height:180px;'
@@ -113,9 +122,9 @@ def _build_listing_cards(listings: list[Listing]) -> str:
 
         score_parts = []
         if listing.text_score is not None:
-            score_parts.append(f"Text: {listing.text_score:.1f}")
+            score_parts.append(f"Tekst: {listing.text_score:.1f}")
         if listing.photo_score is not None:
-            score_parts.append(f"Photo: {listing.photo_score:.1f}")
+            score_parts.append(f"Foto: {listing.photo_score:.1f}")
         score_breakdown = html.escape(_ascii_safe(" | ".join(score_parts))) if score_parts else ""
 
         reasoning_html = ""
@@ -299,7 +308,7 @@ def _send_email(subject_text: str, plain_text: str, html_body: str) -> bool:
 
 
 def send_digest(listings: list[Listing]) -> bool:
-    date_str = datetime.now().strftime("%A %d %B %Y")
+    date_str = _format_nl_date(datetime.now())
     count = len(listings)
     if count > 0:
         subject = f"Huizenjacht: {count} nieuw{' huis' if count==1 else 'e huizen'} - {date_str}"
