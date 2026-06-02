@@ -97,6 +97,11 @@ class TweeDeHandsScraper(BaseScraper):
         if category_id != HOUSES_CATEGORY:
             return None
 
+        # Property type — category 1041 includes apartments; skip non-houses
+        pt = raw.get("categorySpecificAttributes", {}).get("propertyType", "")
+        if pt and pt != "HOUSE":
+            return None
+
         # Location
         location = raw.get("location", {})
         city_name = location.get("cityName", "")
