@@ -228,12 +228,13 @@ def main() -> None:
     parser.add_argument("--scrape-only", action="store_true", help="Only scrape, skip scoring/email")
     parser.add_argument("--weekly-only", action="store_true", help="Skip scraping, send weekly summary")
     parser.add_argument("--test-email", action="store_true", help="Send a test email without scraping")
+    parser.add_argument("--full-dump", action="store_true", help="Send ALL matching houses, ignoring seen history")
     args = parser.parse_args()
 
     start_time = datetime.now()
     logger.info("Huizenjacht starting...")
     logger.info("Timestamp: %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
-    logger.info("Mode: %s", "test-email" if args.test_email else "weekly-only" if args.weekly_only else "dry-run" if args.dry_run else "scrape-only" if args.scrape_only else "full")
+    logger.info("Mode: %s", "full-dump" if args.full_dump else "test-email" if args.test_email else "weekly-only" if args.weekly_only else "dry-run" if args.dry_run else "scrape-only" if args.scrape_only else "full")
 
     seen_ids = load_seen_ids(SEEN_FILE)
     history = load_history(HISTORY_FILE)
@@ -262,9 +263,24 @@ def main() -> None:
     # Backstop: filter out anything that's not a house
     before = len(all_listings)
     all_listings = [l for l in all_listings if l.property_type == "house"]
-    logger.info("Property type filter: kept %s/%s listings (houses only)", len(all_listings), before)
+    # Extra title-based catch: some scrapers don't set property_type but title tells all
+    before2 = len(all_listings)
+    all_listings = [l for l in all_listings if "appartement" not in l.title.lower()]
+    logger.info("Property type filter: kept %s/%s listings (houses only, title catch: %s removed)", len(all_listings), before, before2 - len(all_listings))
 
-    new_listings = deduplicate(all_listings, sent_keys, sent_fps)
+    if args.full_dump:
+        # Same-run dedup only (ignore history, but catch same listing across pages)
+        run_fingerprints: set[str] = set()
+        run_deduped: list[Listing] = []
+        for l in all_listings:
+            fp = listing_fingerprint(l)
+            if fp not in run_fingerprints:
+                run_fingerprints.add(fp)
+                run_deduped.append(l)
+        new_listings = run_deduped
+        logger.info("Full dump mode: same-run dedup %s → %s houses (ignoring seen history)", len(all_listings), len(new_listings))
+    else:
+        new_listings = deduplicate(all_listings, sent_keys, sent_fps)
 
     if new_listings:
         logger.info("\nEnriching listings...")

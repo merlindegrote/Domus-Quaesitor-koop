@@ -145,8 +145,14 @@ class TweeDeHandsScraper(BaseScraper):
         # Lot surface — not available on 2dehands
         lot_surface = None
 
-        # Title
+        # Property type
         title = raw.get("title", f"House in {city_name}")
+        # Detect property type from title
+        title_lower = title.lower()
+        if "appartement" in title_lower or "apartment" in title_lower:
+            property_type = "apartment"
+        else:
+            property_type = "house"
 
         # Description
         description = raw.get("description", "")
@@ -184,6 +190,7 @@ class TweeDeHandsScraper(BaseScraper):
             surface_m2=surface,
             epc_label=epc_label,
             lot_surface_m2=lot_surface,
+            property_type=property_type,
         )
 
     def enrich_listing(self, listing: Listing) -> Listing:

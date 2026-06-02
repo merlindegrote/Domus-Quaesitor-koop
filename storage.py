@@ -87,9 +87,21 @@ def normalize_text(value: str) -> str:
     return collapsed
 
 
+def _normalize_address(address: str) -> str:
+    """Normalize address for dedup: remove postcode, spaces, lowercase."""
+    # Remove postal codes (4 digits not part of a longer number)
+    addr = re.sub(r'\s*(?<!\d)\d{4}(?!\d)\s*', ' ', address)
+    # Remove punctuation (commas, hyphens, etc.)
+    addr = re.sub(r'[,./;:\-]+', ' ', addr)
+    # Lowercase and collapse whitespace
+    addr = addr.lower().strip()
+    addr = re.sub(r'\s+', '', addr)  # Remove all spaces
+    return addr
+
+
 def listing_fingerprint(listing: Listing) -> str:
     """Stable cross-platform fingerprint for a property."""
-    address = normalize_text(listing.address)
+    address = _normalize_address(listing.address)
     title = normalize_text(listing.title)
     return "|".join(
         [
