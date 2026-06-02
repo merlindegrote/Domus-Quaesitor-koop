@@ -355,7 +355,15 @@ def main():
     # 2. Filter appartementen
     all_listings, removed_app = filter_appartementen(all_listings)
     print(f"🚫 Appartementen uitgefilterd: {removed_app}")
-    
+
+    # Backstop: filter appartementen
+    before = len(all_listings)
+    all_listings = [ld for ld in all_listings if ld.get("property_type", "house") == "house"]
+    all_listings = [ld for ld in all_listings if "appartement" not in ld.get("title", "").lower()]
+    filtered = before - len(all_listings)
+    if filtered:
+        print(f"  🏢 {filtered} appartementen uitgefilterd (backstop)")
+
     # 2b. Filter op stad (ALLEEN voor Immovlan — andere scrapers zoeken al lokaal)
     all_listings, removed_city = filter_by_city(all_listings)
     if removed_city:
