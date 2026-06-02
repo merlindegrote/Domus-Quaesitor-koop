@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
 """
-Huizenjacht (House Hunter) orchestrator.
+Huizenjacht (House Hunter) orchestrator — parallel batch architecture.
 
-Daily mode:
-- scrape listings from Immoweb, Zimmo, Immoscoop
-- deduplicate against previously emailed listings
-- score (text + photos) and email new listings
+Runs 4 phases as subprocesses:
+  1. collect.py   — run all scrapers in parallel, collect IDs only
+  2. scrape_batch — split IDs into batches of 10, fetch detail pages in parallel
+  3. process.py   — merge, dedup, score, save history
+  4. email.py     — build HTML digest and send via SMTP
 """
 
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import json
 import logging
 import os
-import re
+import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-from email_sender.digest import send_digest, send_weekly_digest
-from location_filter import needs_renovation, filter_listings_by_location
-from scoring.photo_scorer import PhotoScorer, compute_final_scores
-from scoring.text_scorer import TextScorer
-from scrapers import ImmowebScraper, ImmovlanScraper, ImmoscoopScraper, Listing, TweeDeHandsScraper, ZimmoScraper
 from storage import (
     build_sent_index,
     iso_week_key,
-    listing_fingerprint,
     load_history,
     load_seen_ids,
     mark_weekly_report_sent,
@@ -39,6 +37,7 @@ from storage import (
     weekly_report_already_sent,
     weekly_top_listings,
 )
+from email_sender.digest import send_weekly_digest
 
 load_dotenv()
 
@@ -50,192 +49,180 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).parent / "data"
-SEEN_FILE = DATA_DIR / "seen_listings.json"
-HISTORY_FILE = DATA_DIR / "listing_history.json"
+BASE_DIR = Path(__file__).parent
+BATCHES_DIR = "/tmp/domus-batches"
+COLLECTED_PATH = "/tmp/domus-collected-ids.json"
+PROCESSED_PATH = "/tmp/domus-processed.json"
+BATCH_SIZE = 10
+PHASE_TIMEOUT = 120  # seconds per subprocess
 
 
-def scrape_all() -> list[Listing]:
-    """Run all scrapers and collect listings."""
-    scrapers = [ImmowebScraper(), ZimmoScraper(), ImmoscoopScraper(), ImmovlanScraper(), TweeDeHandsScraper()]
-    all_listings: list[Listing] = []
-
-    for scraper in scrapers:
-        logger.info("\n%s", "=" * 50)
-        logger.info("Scraping %s...", scraper.PLATFORM_NAME)
-        logger.info("%s", "=" * 50)
-        all_listings.extend(scraper.safe_scrape())
-
-    logger.info("\nTotal listings scraped: %s", len(all_listings))
-    return all_listings
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
 
 
-def deduplicate(
-    listings: list[Listing],
-    sent_unique_keys: set[str],
-    sent_fingerprints: set[str],
-) -> list[Listing]:
-    """Keep only listings not emailed before."""
-    new_listings: list[Listing] = []
-    run_fingerprints: set[str] = set()
-
-    for listing in listings:
-        unique_key = listing.unique_key
-        fingerprint = listing_fingerprint(listing)
-
-        if unique_key in sent_unique_keys:
-            logger.debug("Skipping previously emailed id: %s", unique_key)
-            continue
-        if fingerprint in sent_fingerprints:
-            logger.debug("Skipping previously emailed fingerprint: %s", fingerprint)
-            continue
-        if fingerprint in run_fingerprints:
-            logger.debug("Skipping same-run duplicate: %s", fingerprint)
-            continue
-
-        run_fingerprints.add(fingerprint)
-        new_listings.append(listing)
-
-    logger.info(
-        "New after dedup: %s (filtered %s dupes)",
-        len(new_listings),
-        len(listings) - len(new_listings),
-    )
-    return new_listings
-
-
-def enrich_listings(listings: list[Listing]) -> list[Listing]:
-    """Enrich listings with full descriptions from detail pages."""
-    from config import ACCEPT_CITIES
-
-    scrapers = {
-        "immoweb": ImmowebScraper(),
-        "zimmo": ZimmoScraper(),
-        "immoscoop": ImmoscoopScraper(),
-        "immovlan": ImmovlanScraper(),
-        "tweedehands": TweeDeHandsScraper(),
-    }
-
-    for listing in listings:
-        if not listing.description or len(listing.description) < 80:
-            scraper = scrapers.get(listing.platform)
-            if scraper and hasattr(scraper, "enrich_listing"):
-                logger.info("Enriching %s:%s...", listing.platform, listing.id)
-                scraper.enrich_listing(listing)
-
-    # Universal fallback: fetch og:image for any listing without photos
-    import urllib.request
-    for listing in listings:
-        if not listing.image_urls:
-            logger.info("Fetching og:image for %s:%s...", listing.platform, listing.id)
-            try:
-                req = urllib.request.Request(listing.url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    html = resp.read().decode("utf-8", errors="ignore")
-                    match = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html)
-                    if match:
-                        listing.image_urls = [match.group(1)]
-            except Exception:
-                pass
-
-    return listings
-
-
-def score_listings(listings: list[Listing]) -> list[Listing]:
-    """Run text and photo scoring, then sort by final score."""
-    logger.info("\nAI text scoring...")
-    text_scorer = TextScorer()
-    listings = text_scorer.score_listings(listings)
-
-    if os.environ.get("ENABLE_PHOTO_SCORING", "true").lower() in {"1", "true", "yes", "on"}:
-        logger.info("\nAI photo scoring...")
-        photo_scorer = PhotoScorer()
-        listings = photo_scorer.score_listings(listings)
-    else:
-        logger.info("\nPhoto scoring disabled")
-
-    return compute_final_scores(listings)
-
-
-def log_ranked_results(listings: list[Listing], heading: str) -> None:
-    """Print ranked listings to the log."""
+def run_phase(script: str, timeout: int = PHASE_TIMEOUT) -> bool:
+    """Run a phase script as a subprocess. Returns True on success."""
+    script_path = os.path.join(BASE_DIR, "phases", script)
     logger.info("\n%s", "=" * 60)
-    logger.info("%s", heading)
+    logger.info("Running phase: %s", script)
     logger.info("%s", "=" * 60)
 
-    if not listings:
-        logger.info("No listings to show")
-        return
-
-    for i, listing in enumerate(listings, 1):
-        score_str = f"{listing.final_score:.1f}" if listing.final_score is not None else "-"
-        logger.info(
-            "#%s [%s/10] %s - EUR %s - %s (%s)",
-            i, score_str, listing.title, listing.price,
-            listing.address, listing.platform,
+    try:
+        env = os.environ.copy()
+        result = subprocess.run(
+            ["python3", script_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
         )
-        if listing.score_reasoning:
-            logger.info("    %s", listing.score_reasoning)
+        # Log output
+        if result.stdout:
+            for line in result.stdout.strip().split("\n"):
+                if line.strip():
+                    logger.info("[%s] %s", script, line)
+        if result.stderr:
+            for line in result.stderr.strip().split("\n"):
+                if line.strip():
+                    logger.warning("[%s:stderr] %s", script, line)
+        if result.returncode == 0:
+            logger.info("[%s] ✅ Completed successfully", script)
+            return True
+        else:
+            logger.error("[%s] ❌ Failed with exit code %d", script, result.returncode)
+            return False
+    except subprocess.TimeoutExpired:
+        logger.error("[%s] ❌ Timed out after %ds", script, timeout)
+        return False
+    except Exception as e:
+        logger.error("[%s] ❌ Error: %s", script, e)
+        return False
 
 
-def persist_new_listings(
-    history: dict,
-    seen_ids: set[str],
-    listings: list[Listing],
-    discovered_at: datetime,
-    email_sent: bool,
-) -> None:
-    """Persist newly discovered listings."""
-    for listing in listings:
-        upsert_listing_record(history, listing, discovered_at, was_emailed=email_sent)
-        if email_sent:
-            seen_ids.add(listing.unique_key)
+def run_batch_scrapes() -> bool:
+    """Read collected IDs, split into batches, run scrape_batch.py for each."""
+    if not os.path.exists(COLLECTED_PATH):
+        logger.error("No collected IDs at %s. Skipping Phase 2.", COLLECTED_PATH)
+        return False
+
+    try:
+        with open(COLLECTED_PATH, "r", encoding="utf-8") as f:
+            collected = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error("Failed to read collected IDs: %s", e)
+        return False
+
+    # Build batches: {scraper: [batch_1_ids, batch_2_ids, ...]}
+    all_batches: list[tuple[str, list[str], str]] = []
+    batch_index = 0
+
+    for scraper_name, ids in collected.items():
+        if not ids:
+            logger.info("[batches] %s: no IDs to scrape", scraper_name)
+            continue
+
+        # Split into batches of BATCH_SIZE
+        for start in range(0, len(ids), BATCH_SIZE):
+            batch_ids = ids[start:start + BATCH_SIZE]
+            output_path = os.path.join(BATCHES_DIR, f"batch-{batch_index}.json")
+            all_batches.append((scraper_name, batch_ids, output_path))
+            logger.info("[batches] %s batch %d: %d IDs → %s",
+                        scraper_name, batch_index, len(batch_ids), output_path)
+            batch_index += 1
+
+    if not all_batches:
+        logger.warning("[batches] No batches to scrape")
+        return False
+
+    logger.info("[batches] Total batches: %d", len(all_batches))
+
+    # Run all batches in parallel using ThreadPoolExecutor
+    success_count = 0
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for scraper_name, batch_ids, output_path in all_batches:
+            ids_str = ",".join(batch_ids)
+            cmd = [
+                "python3",
+                str(BASE_DIR / "phases" / "scrape_batch.py"),
+                "--scraper", scraper_name,
+                "--ids", ids_str,
+                "--output", output_path,
+            ]
+            futures.append(executor.submit(_run_batch, cmd, scraper_name, len(batch_ids)))
+
+        for future in concurrent.futures.as_completed(futures):
+            if future.result():
+                success_count += 1
+
+    total = len(all_batches)
+    logger.info("[batches] ✅ %d/%d batches completed successfully", success_count, total)
+    return success_count > 0
 
 
-def maybe_send_weekly_digest(
-    history: dict,
-    *,
-    now: datetime,
-    dry_run: bool,
-    scrape_only: bool,
-) -> None:
+def _run_batch(cmd: list[str], scraper: str, count: int) -> bool:
+    """Run a single scrape_batch.py subprocess."""
+    try:
+        env = os.environ.copy()
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=PHASE_TIMEOUT,
+            env=env,
+        )
+        if result.returncode == 0:
+            logger.debug("[batch][%s] %d IDs OK", scraper, count)
+            return True
+        else:
+            logger.warning("[batch][%s] Failed (exit %d): %s",
+                           scraper, result.returncode,
+                           result.stderr.strip()[:200])
+            return False
+    except subprocess.TimeoutExpired:
+        logger.warning("[batch][%s] Timed out after %ds", scraper, PHASE_TIMEOUT)
+        return False
+    except Exception as e:
+        logger.warning("[batch][%s] Error: %s", scraper, e)
+        return False
+
+
+def run_weekly_digest(history: dict, now: datetime, dry_run: bool) -> None:
     """Send the weekly digest once per ISO week."""
-    if dry_run or scrape_only:
-        return
-    if now.weekday() != 4:
-        return
-
-    week_key = iso_week_key(now)
-    if weekly_report_already_sent(history, week_key):
-        logger.info("Weekly digest already sent for %s", week_key)
-        return
-
-    weekly = weekly_top_listings(history, week_key, limit=10)
-    log_ranked_results(weekly, f"WEEKLY TOP 10 - {week_label(week_key)}")
-
-    logger.info("\nSending weekly digest...")
-    if send_weekly_digest(weekly, week_label(week_key)):
-        mark_weekly_report_sent(history, week_key)
-    else:
-        logger.error("Weekly digest failed")
-
-
-def run_weekly_only(history: dict, now: datetime, dry_run: bool) -> None:
-    """Send or preview the weekly digest without scraping."""
-    week_key = iso_week_key(now)
-    weekly = weekly_top_listings(history, week_key, limit=10)
-    log_ranked_results(weekly, f"WEEKLY TOP 10 - {week_label(week_key)}")
     if dry_run:
-        logger.info("\nDry run - skipping weekly email")
         return
+    if now.weekday() != 4:  # Friday
+        return
+
+    week_key = iso_week_key(now)
     if weekly_report_already_sent(history, week_key):
         logger.info("Weekly digest already sent for %s", week_key)
         return
-    logger.info("\nSending weekly digest...")
+
+    weekly = weekly_top_listings(history, week_key, limit=10)
+
+    # Log top 10
+    logger.info("\nWeekly Top 10 — %s", week_label(week_key))
+    for i, l in enumerate(weekly, 1):
+        score = f"{l.final_score:.1f}" if l.final_score is not None else "-"
+        logger.info(
+            "#%s [%s/10] %s — EUR %s — %s (%s)",
+            i, score, l.title, l.price, l.address, l.platform,
+        )
+
+    logger.info("Sending weekly digest...")
     if send_weekly_digest(weekly, week_label(week_key)):
         mark_weekly_report_sent(history, week_key)
+        save_history(Path(BASE_DIR / "data" / "listing_history.json"), history)
+        logger.info("Weekly digest sent and marked")
     else:
         logger.error("Weekly digest failed")
+
+
+def enforce_photo_scoring_env() -> None:
+    """Ensure ENABLE_PHOTO_SCORING is disabled (Gemini out)."""
+    os.environ["ENABLE_PHOTO_SCORING"] = "false"
 
 
 def main() -> None:
@@ -247,90 +234,81 @@ def main() -> None:
     parser.add_argument("--full-dump", action="store_true", help="Send ALL matching houses, ignoring seen history")
     args = parser.parse_args()
 
+    # Force photo scoring off
+    enforce_photo_scoring_env()
+
     start_time = datetime.now()
     logger.info("Huizenjacht starting...")
     logger.info("Timestamp: %s", start_time.strftime("%Y-%m-%d %H:%M:%S"))
-    logger.info("Mode: %s", "full-dump" if args.full_dump else "test-email" if args.test_email else "weekly-only" if args.weekly_only else "dry-run" if args.dry_run else "scrape-only" if args.scrape_only else "full")
+    mode = "full-dump" if args.full_dump else "test-email" if args.test_email else "weekly-only" if args.weekly_only else "dry-run" if args.dry_run else "scrape-only" if args.scrape_only else "full"
+    logger.info("Mode: %s", mode)
 
-    seen_ids = load_seen_ids(SEEN_FILE)
-    history = load_history(HISTORY_FILE)
-    sent_keys, sent_fps = build_sent_index(history, seen_ids)
-    logger.info("Previously emailed: %s ids, %s fingerprints", len(sent_keys), len(sent_fps))
-
+    # ─── Test email mode ────────────────────────────────────────
     if args.test_email:
         logger.info("Sending test email...")
-        send_digest([])
+        run_phase("email.py")
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info("\nDone in %.1fs", elapsed)
         return
 
+    # ─── Weekly-only mode ──────────────────────────────────────
     if args.weekly_only:
-        run_weekly_only(history, start_time, args.dry_run)
-        save_history(HISTORY_FILE, history)
+        history = load_history(BASE_DIR / "data" / "listing_history.json")
+        run_weekly_digest(history, start_time, dry_run=False)
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info("\nDone in %.1fs", elapsed)
         return
 
-    all_listings = scrape_all()
+    # ─── Full pipeline ──────────────────────────────────────────
+    ensure_dir(BATCHES_DIR)
 
-    # Filter by location + renovation check
-    all_listings = [l for l in all_listings if not needs_renovation(l)]
+    # Phase 1: Collect IDs (all scrapers in parallel)
+    phase1_ok = run_phase("collect.py")
 
-    # Backstop: filter out anything that's not a house
-    before = len(all_listings)
-    all_listings = [l for l in all_listings if l.property_type == "house"]
-    # Extra title-based catch: some scrapers don't set property_type but title tells all
-    before2 = len(all_listings)
-    all_listings = [l for l in all_listings if "appartement" not in l.title.lower()]
-    logger.info("Property type filter: kept %s/%s listings (houses only, title catch: %s removed)", len(all_listings), before, before2 - len(all_listings))
-
-    if args.full_dump:
-        # Same-run dedup only (ignore history, but catch same listing across pages)
-        run_fingerprints: set[str] = set()
-        run_deduped: list[Listing] = []
-        for l in all_listings:
-            fp = listing_fingerprint(l)
-            if fp not in run_fingerprints:
-                run_fingerprints.add(fp)
-                run_deduped.append(l)
-        new_listings = run_deduped
-        logger.info("Full dump mode: same-run dedup %s → %s houses (ignoring seen history)", len(all_listings), len(new_listings))
+    # Phase 2: Batch scrape (only if Phase 1 produced IDs)
+    phase2_ok = False
+    if phase1_ok and os.path.exists(COLLECTED_PATH):
+        try:
+            with open(COLLECTED_PATH) as f:
+                collected = json.load(f)
+            total_ids = sum(len(v) for v in collected.values())
+            if total_ids > 0:
+                logger.info("Total IDs collected: %d — starting batch scrapes", total_ids)
+                phase2_ok = run_batch_scrapes()
+            else:
+                logger.warning("No IDs collected — skipping Phase 2")
+        except Exception as e:
+            logger.warning("Failed to inspect collected IDs: %s", e)
     else:
-        new_listings = deduplicate(all_listings, sent_keys, sent_fps)
+        logger.warning("Phase 1 did not produce IDs — skipping Phase 2")
 
-    if new_listings:
-        logger.info("\nEnriching listings...")
-        new_listings = enrich_listings(new_listings)
-
-        # Apply location filter (city accept/exclude)
-        before_filter = len(new_listings)
-        new_listings = filter_listings_by_location(new_listings)
-        logger.info("Location filter: kept %s/%s", len(new_listings), before_filter)
-
-        if not args.scrape_only:
-            new_listings = score_listings(new_listings)
-
-        log_ranked_results(new_listings, f"DAILY RESULTS - {len(new_listings)} new listings ranked")
+    # Phase 3: Process, dedup, score
+    if phase2_ok or args.full_dump:
+        # For --full-dump, we skip dedup against history, so pass the flag through env
+        if args.full_dump:
+            os.environ["DOMUS_FULL_DUMP"] = "true"
+        else:
+            os.environ.pop("DOMUS_FULL_DUMP", None)
+        run_phase("process.py", timeout=PHASE_TIMEOUT)
     else:
-        logger.info("No new listings after dedup")
+        logger.warning("No batches to process — skipping Phase 3")
 
-    daily_email_sent = False
+    # Phase 4: Email
     if not args.dry_run and not args.scrape_only:
-        logger.info("\nSending daily digest...")
-        daily_email_sent = send_digest(new_listings)
+        if os.path.exists(PROCESSED_PATH):
+            logger.info("Sending daily digest...")
+            run_phase("email.py", timeout=PHASE_TIMEOUT)
+        else:
+            logger.warning("No processed data — skipping Phase 4")
     elif args.dry_run:
-        logger.info("\nDry run - skipping email")
+        logger.info("Dry run — skipping email")
     else:
-        logger.info("\nScrape-only - skipping email")
+        logger.info("Scrape-only — skipping email")
 
+    # ─── Weekly digest (Fridays) ──────────────────────────────
     if not args.dry_run and not args.scrape_only:
-        persist_new_listings(history, seen_ids, new_listings, start_time, daily_email_sent)
-        save_history(HISTORY_FILE, history)
-        save_seen_ids(SEEN_FILE, seen_ids)
-
-    maybe_send_weekly_digest(history, now=start_time, dry_run=args.dry_run, scrape_only=args.scrape_only)
-    if not args.dry_run and not args.scrape_only:
-        save_history(HISTORY_FILE, history)
+        history = load_history(BASE_DIR / "data" / "listing_history.json")
+        run_weekly_digest(history, start_time, dry_run=False)
 
     elapsed = (datetime.now() - start_time).total_seconds()
     logger.info("\nDone in %.1fs", elapsed)

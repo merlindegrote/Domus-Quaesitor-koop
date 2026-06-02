@@ -29,7 +29,7 @@ from dotenv import load_dotenv
 from location_filter import needs_renovation, filter_listings_by_location
 from scrapers.base import Listing
 from scoring.text_scorer import TextScorer
-from scoring.photo_scorer import compute_final_scores
+
 from storage import (
     build_sent_index,
     listing_fingerprint,
@@ -194,8 +194,10 @@ def process() -> list[Listing]:
     text_scorer = TextScorer()
     all_listings = text_scorer.score_listings(all_listings)
 
-    # Compute final scores (photo scoring disabled per spec)
-    all_listings = compute_final_scores(all_listings)
+    # Final score = text_score (photo scoring disabled per spec)
+    for l in all_listings:
+        if l.final_score is None:
+            l.final_score = l.text_score
 
     # 7. Save to history
     seen_ids = load_seen_ids(SEEN_FILE)
