@@ -148,6 +148,10 @@ class ImmovlanScraper(BaseScraper):
         self, html: str, prop_id: str, final_url: str
     ) -> Listing | None:
         """Parse detail page. Relies primarily on meta description tag + JSON-LD."""
+        # Appartement check on raw HTML before any method
+        if "appartement" in html.lower():
+            return None
+
         # --- Method 1: Parse the meta description tag (most structured) ---
         raw_meta = _RAW_META_RE.search(html)
         if raw_meta:
@@ -466,6 +470,10 @@ class ImmovlanScraper(BaseScraper):
 
     def enrich_listing(self, listing: Listing) -> Listing:
         """Fetch detail page for og:image."""
+        # Skip appartments
+        if "appartement" in listing.title.lower():
+            return listing
+
         try:
             response = self._rate_limited_get(listing.url, timeout=15)
             if response and response.text:
