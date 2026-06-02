@@ -47,7 +47,9 @@ Negatieve indicatoren:
 - Geen parkeerplaats, geen buitenruimte, slechte EPC (D/E/F)
 - Ligging aan drukke weg
 
-Antwoord ALTIJD in correct Nederlands. Enkel geldige JSON, geen extra tekst."""
+Antwoord ALTIJD in het Nederlands — ook de reasoning. Enkel geldige JSON, geen extra tekst.
+De reasoning (uitleg) MOET in het Nederlands. Gebruik Nederlandse zinnen, geen Engelse.
+Voorbeeld: {"modern_score": 7, "reasoning": "Recent gerenoveerde keuken en badkamer, goede EPC B, moderne vloeren."}"""
 
     USER_PROMPT_TEMPLATE = """Beoordeel deze woning op moderniteit en afwerkingsgraad.
 
@@ -62,7 +64,7 @@ Beschrijving:
 {description}
 
 Antwoord in dit exacte JSON formaat:
-{{"modern_score": <cijfer 1-10>, "reasoning": "<korte 1-2 zinnen uitleg in het Nederlands>"}}"""
+{{"modern_score": <cijfer 1-10>, "reasoning": "<korte 1-2 zinnen uitleg in correct Nederlands — GEEN Engels>"}}"""
 
     def __init__(self):
         self.api_key = os.environ.get("DEEPSEEK_API_KEY", "")
@@ -130,6 +132,7 @@ Antwoord in dit exacte JSON formaat:
                 score = float(result.get("modern_score", DEFAULT_SCORE))
                 score = max(1.0, min(10.0, score))  # Clamp to 1-10
                 reasoning = result.get("reasoning", "No reasoning provided")
+                reasoning = self._force_dutch_reasoning(reasoning)
 
                 logger.debug(
                     f"[text_scorer] {listing.platform}:{listing.id} → "
@@ -160,6 +163,32 @@ Antwoord in dit exacte JSON formaat:
                     return DEFAULT_SCORE, f"Scoring error: {str(e)[:100]}"
 
         return DEFAULT_SCORE, DEFAULT_REASONING
+
+    @staticmethod
+    def _force_dutch_reasoning(reasoning: str) -> str:
+        """Vervang Engelse frasen in reasoning door Nederlandse."""
+        nl_replacements = {
+            "The listing lacks any mention of": "De woning heeft geen vermelding van",
+            "The property has": "De woning heeft",
+            "The limited description": "De beperkte beschrijving",
+            "The title lacks": "De titel heeft geen",
+            "The EPC label": "Het EPC-label is",
+            "the absence of": "het ontbreken van",
+            "suggesting": "wat wijst op",
+            "indicating": "wat aangeeft",
+            "implies": "wijst op",
+            "an older property": "een oudere woning",
+            "a dated property": "een verouderde woning",
+            "a traditional home": "een traditionele woning",
+            "no positive indicators": "geen positieve kenmerken",
+            "The description": "De beschrijving",
+            "The property is": "De woning is",
+            "This property": "Deze woning",
+            "The home": "De woning",
+        }
+        for eng, nl in nl_replacements.items():
+            reasoning = reasoning.replace(eng, nl)
+        return reasoning
 
     def score_listings(self, listings: list[Listing]) -> list[Listing]:
         """Score multiple listings, updating them in place."""

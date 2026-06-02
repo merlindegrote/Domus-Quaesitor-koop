@@ -384,28 +384,48 @@ class ImmoscoopScraper(BaseScraper):
             # Surface
             surface = self._extract_surface(card)
 
-            # Image — probeer meerdere attributen en fallback op figure/picture
-            img = card.select_one("img")
+            # Image — probeer meerdere selectoren en attributen
             image_url = ""
+            img_attrs = ("src", "data-src", "data-lazy", "data-original", "data-srcset", "srcset")
+
+            # Eerst img[src] of img[data-src]
+            img = card.select_one("img[src], img[data-src]")
             if img:
-                for attr in ["src", "data-src", "data-srcset", "srcset"]:
+                for attr in img_attrs:
                     val = img.get(attr, "")
                     if val:
                         if " " in val:
                             val = val.split(" ")[0]  # srcset = "url 1x, url2 2x"
                         image_url = val
                         break
+
+            if not image_url:
+                # Fallback: alle img tags in de card
+                all_imgs = card.find_all("img")
+                for img_tag in all_imgs:
+                    for attr in ("src", "data-src", "data-lazy", "data-original"):
+                        val = img_tag.get(attr, "")
+                        if val and "placeholder" not in val.lower():
+                            image_url = val
+                            break
+                    if image_url:
+                        break
+
             if not image_url:
                 # Fallback: check figure/picture elementen
                 fig = card.select_one("figure img, picture img")
                 if fig:
-                    for attr in ["src", "data-src", "data-srcset", "srcset"]:
+                    for attr in img_attrs:
                         val = fig.get(attr, "")
                         if val:
                             if " " in val:
                                 val = val.split(" ")[0]
                             image_url = val
                             break
+
+            # Relative URL fix (bv. "//cdn.immoscoop.be/...")
+            if image_url and image_url.startswith("//"):
+                image_url = f"https:{image_url}"
 
             return Listing(
                 id=listing_id,

@@ -416,7 +416,7 @@ class ImmowebScraper(BaseScraper):
             response = self._rate_limited_get(listing.url)
 
             classified_match = re.search(
-                r'window\.classified\s*=\s*(\{.*?\});\s*\n',
+                r'window\.classified\s*=\s*(\{.*\})\s*;\s*',
                 response.text,
                 re.DOTALL,
             )
