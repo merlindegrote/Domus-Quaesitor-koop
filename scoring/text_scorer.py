@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scrapers.base import Listing
 
@@ -201,18 +202,18 @@ Antwoord in dit exacte JSON formaat:
 
         logger.info(f"[text_scorer] Scoring {len(listings)} listings...")
 
-        for i, listing in enumerate(listings):
-            score, reasoning = self.score_listing(listing)
-            listing.text_score = score
-            listing.score_reasoning = reasoning
-
-            # Small delay between API calls to avoid rate limiting
-            if i < len(listings) - 1:
-                time.sleep(1)
-
-            logger.info(
-                f"[text_scorer] ({i + 1}/{len(listings)}) "
-                f"{listing.platform}:{listing.id} → {score:.1f}/10"
-            )
+        with ThreadPoolExecutor(max_workers=10) as pool:
+            fut_map = {
+                pool.submit(self.score_listing, listing): listing
+                for listing in listings
+            }
+            for fut in as_completed(fut_map):
+                listing = fut_map[fut]
+                score, reasoning = fut.result()
+                listing.text_score = score
+                listing.score_reasoning = reasoning
+                logger.info(
+                    f"[text_scorer] ({listing.platform}:{listing.id}) → {score:.1f}/10"
+                )
 
         return listings

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from storage import Listing, listing_fingerprint, listing_full_fingerprint, load_history, save_history
 from scoring.text_scorer import TextScorer
 from email_sender.digest import send_digest
-from config import ACCEPT_CITIES
+from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL
 from phases.embed_images import embed_images
 from scrapers.immoweb import ImmowebScraper
 from scrapers.zimmo import ZimmoScraper
@@ -167,12 +167,17 @@ def filter_appartementen(listings):
     return clean, removed
 
 def filter_by_city(listings):
-    """Filter listings die niet in ACCEPT_CITIES vallen via adres of URL"""
+    """Filter listings die niet in ACCEPT_CITIES vallen via adres of URL + EXCLUDE_CITIES"""
     clean = []
     removed = 0
     for ld in listings:
         addr = (ld.get("address") or "").lower()
         url = (ld.get("url") or "").lower()
+        # Skip if in EXCLUDE_CITIES
+        if any(city.lower() in addr or city.lower() in url for city in EXCLUDE_CITIES_FINAL):
+            removed += 1
+            continue
+        # Accept if in ACCEPT_CITIES
         if any(city.lower() in addr or city.lower() in url for city in ACCEPT_CITIES):
             clean.append(ld)
         else:

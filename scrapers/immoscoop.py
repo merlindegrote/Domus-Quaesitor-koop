@@ -6,6 +6,7 @@ import json
 import logging
 import re
 
+import requests
 from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
@@ -124,31 +125,26 @@ class ImmoscoopScraper(BaseScraper):
             # Image — probeer meerdere selectoren en attributen
             image_urls: list[str] = []
             img_attrs = ("src", "data-src", "data-lazy", "data-original", "data-srcset", "srcset")
-            img = container.select_one("img[src], img[data-src]")
-            if img:
+            
+            # Eerst door alle img tags in de container
+            all_imgs = container.find_all("img")
+            for img_tag in all_imgs:
                 for attr in img_attrs:
-                    val = img.get(attr, "")
-                    if val:
+                    val = img_tag.get(attr, "")
+                    if val and "placeholder" not in val.lower():
                         if " " in val:
                             val = val.split(" ")[0]
-                        image_urls = [val]
+                        if val not in image_urls:
+                            image_urls.append(val)
                         break
-
-            if not image_urls:
-                # Fallback: alle img tags
-                all_imgs = container.find_all("img")
-                for img_tag in all_imgs:
-                    for attr in ("src", "data-src", "data-lazy", "data-original"):
-                        val = img_tag.get(attr, "")
-                        if val and "placeholder" not in val.lower():
-                            image_urls = [val]
-                            break
-                    if image_urls:
-                        break
+                if len(image_urls) >= 3:
+                    break
 
             # Relative URL fix
-            if image_urls and image_urls[0].startswith("//"):
-                image_urls[0] = f"https:{image_urls[0]}"
+            image_urls = [
+                f"https:{u}" if u.startswith("//") else u
+                for u in image_urls
+            ]
 
             address = self._extract_address_from_text(text)
             if title_text in ("Huis te koop", "House", "Te koop") or any(x in title_text.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
@@ -172,7 +168,7 @@ class ImmoscoopScraper(BaseScraper):
                     url=href,
                     description="",
                     image_urls=image_urls,
-                    surface_m2=self._extract_surface(container),
+                    surface_m2=self._extract_surface(container), epc_label=self._extract_epc_from_text(container.get_text(" ", strip=True)),
                 )
             )
             seen_ids.add(listing_id)
@@ -180,49 +176,102 @@ class ImmoscoopScraper(BaseScraper):
         return listings
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        """Fetch detail page data for description and extra photos."""
-        if listing.description and len(listing.description) >= 80 and len(listing.image_urls) > 1:
+        """Fetch detail page, extract fotos + EPC uit __NEXT_DATA__ JSON."""
+        if listing.description and len(listing.description) >= 80 and listing.epc_label:
             return listing
 
         try:
-            response = self._rate_limited_get(listing.url)
+            response = requests.get(listing.url, timeout=(5, 10), headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            })
             soup = BeautifulSoup(response.text, "lxml")
 
-            if not listing.description:
-                for selector in [
-                    'meta[property="og:description"]',
-                    'meta[name="description"]',
-                    '[class*="description"]',
-                    '[class*="beschrij"]',
-                ]:
-                    node = soup.select_one(selector)
-                    if not node:
-                        continue
-                    if node.name == "meta":
-                        text = node.get("content", "").strip()
-                    else:
-                        text = node.get_text(" ", strip=True)
-                    if len(text) >= 40:
-                        listing.description = text
-                        break
+            # Parse __NEXT_DATA__ — bevat ALLE data
+            script = soup.find("script", id="__NEXT_DATA__")
+            if script:
+                data = json.loads(script.string)
+                prop = data.get("props", {}).get("pageProps", {}).get("property", {})
 
-            if len(listing.image_urls) <= 1:
-                images = soup.select('img[src*="immoscoop"], img[data-src*="immoscoop"], img[src]')
-                image_urls: list[str] = []
+                # Beschrijving
+                if not listing.description or len(listing.description) < 80:
+                    desc = prop.get("description", "")
+                    if desc:
+                        desc_clean = re.sub(r"<[^>]+>", " ", desc).strip()
+                        desc_clean = re.sub(r"\s+", " ", desc_clean)
+                        if len(desc_clean) >= 40:
+                            listing.description = desc_clean
+
+                # Fotos — uit prop.images[]
+                images = prop.get("images", [])
+                image_urls = []
                 for img in images:
-                    image_url = img.get("src") or img.get("data-src") or ""
-                    if not image_url:
-                        continue
-                    if image_url.startswith("//"):
-                        image_url = f"https:{image_url}"
-                    elif not image_url.startswith("http"):
-                        image_url = f"https://www.immoscoop.be{image_url}"
-                    if image_url not in image_urls:
-                        image_urls.append(image_url)
-                    if len(image_urls) >= 5:
+                    url = img.get("url", "")
+                    if url and url.startswith("http"):
+                        image_urls.append(url)
+                    if len(image_urls) >= 8:
                         break
                 if image_urls:
                     listing.image_urls = image_urls
+
+                # EPC — uit features (id == "EpcClass") of propertyDetailGroups
+                if not listing.epc_label:
+                    for feature in prop.get("features", []):
+                        if isinstance(feature, dict) and feature.get("id") == "EpcClass":
+                            val = feature.get("value", "")
+                            if val:
+                                listing.epc_label = val.upper()
+                                break
+
+                if not listing.epc_label:
+                    for group in prop.get("propertyDetailGroups", []):
+                        if isinstance(group, dict) and "Energie" in group.get("group", ""):
+                            for detail in group.get("propertyDetails", []):
+                                if "EPC-label" in detail.get("title", ""):
+                                    val = detail.get("description", "")
+                                    if val:
+                                        listing.epc_label = val.upper()
+                                        break
+
+                # Surface — uit Groep "Gebouw" > "Bewoonbare oppervlakte"
+                if not listing.surface_m2:
+                    for group in prop.get("propertyDetailGroups", []):
+                        if isinstance(group, dict) and "Gebouw" in group.get("group", ""):
+                            for detail in group.get("propertyDetails", []):
+                                if "Bewoonbare oppervlakte" in detail.get("title", ""):
+                                    val = self._safe_int(re.sub(r"[^0-9]", "", detail.get("description", "")))
+                                    if val:
+                                        listing.surface_m2 = val
+                                        break
+
+                # Lot surface — uit Groep "Terrein" > "Perceeloppervlakte"
+                if not listing.lot_surface_m2:
+                    for group in prop.get("propertyDetailGroups", []):
+                        if isinstance(group, dict) and "Terrein" in group.get("group", ""):
+                            for detail in group.get("propertyDetails", []):
+                                if "Perceeloppervlakte" in detail.get("title", ""):
+                                    val = self._safe_int(re.sub(r"[^0-9]", "", detail.get("description", "")))
+                                    if val:
+                                        listing.lot_surface_m2 = val
+                                        break
+
+                # Bedrooms — uit Groep "Indeling" > "Aantal slaapkamers"
+                if not listing.bedrooms:
+                    for group in prop.get("propertyDetailGroups", []):
+                        if isinstance(group, dict) and "Indeling" in group.get("group", ""):
+                            for detail in group.get("propertyDetails", []):
+                                if "Aantal slaapkamers" in detail.get("title", ""):
+                                    val = self._safe_int(re.sub(r"[^0-9]", "", detail.get("description", "")))
+                                    if val:
+                                        listing.bedrooms = val
+                                        break
+
+                # Prijs — uit prop.price
+                if isinstance(prop.get("price"), dict):
+                    price_label = prop["price"].get("label", "")
+                    price_val = self._safe_int(re.sub(r"[^0-9]", "", price_label))
+                    if price_val and MIN_PRICE <= price_val <= MAX_PRICE:
+                        listing.price = price_val
+
         except Exception as exc:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to enrich listing {listing.id}: {exc}")
 
@@ -552,6 +601,22 @@ class ImmoscoopScraper(BaseScraper):
             if match:
                 return int(match.group(1))
         return 0
+
+    @staticmethod
+    def _extract_epc_from_text(text: str) -> str | None:
+        """Extract EPC label from text, e.g. 'EPC A', 'energielabel B+'"""
+        m = re.search(
+            r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-E][+-]?)\b"
+            r"|energie(?:label|prestatie)[\s:-]*([A-E][+-]?)\b"
+            r"|energielabel[\s:-]*([A-E][+-]?)\b"
+            r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-E][+-]?)\b",
+            text, re.I
+        )
+        if m:
+            label = next((g for g in m.groups() if g), None)
+            if label:
+                return label.upper().replace("+", "+")
+        return None
 
     @staticmethod
     def _extract_surface(card: BeautifulSoup) -> int | None:

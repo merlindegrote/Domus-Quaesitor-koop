@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from scrapers.base import Listing
 
@@ -130,11 +131,15 @@ Respond ONLY valid JSON, no markdown:
         skipped_noimg = 0
         scored = 0
 
+        # Pre-processing: EPC D+ / geen fotos skippen
+        photo_tasks = []
         for listing in to_score:
+            addr = listing.address or listing.title or "?"
             if self._bad_epc(listing.epc_label):
                 listing.photo_score = None
                 listing.final_score = self._compute_final(listing)
                 skipped_epc += 1
+                print(f"  photo ⏭ EPC {listing.epc_label} — {addr[:50]}")
                 continue
 
             valid_urls = [u for u in listing.image_urls[:self.MAX_PHOTOS]
@@ -143,13 +148,26 @@ Respond ONLY valid JSON, no markdown:
                 listing.photo_score = None
                 listing.final_score = self._compute_final(listing)
                 skipped_noimg += 1
+                print(f"  photo ⏭ geen fotos — {addr[:50]}")
                 continue
 
-            score = self._call_openrouter(valid_urls)
-            listing.photo_score = score
-            listing.final_score = self._compute_final(listing)
-            if score is not None:
-                scored += 1
+            photo_tasks.append((listing, valid_urls))
+
+        # Parallelle OpenRouter calls — geen rate limit, geen delay
+        if photo_tasks:
+            print(f"  photo 📸 {len(photo_tasks)} listings parallel via OpenRouter...", flush=True)
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                fut_map = {
+                    pool.submit(self._call_openrouter, urls): (listing, urls)
+                    for listing, urls in photo_tasks
+                }
+                for fut in as_completed(fut_map):
+                    listing, _ = fut_map[fut]
+                    score = fut.result()
+                    if score is not None:
+                        scored += 1
+                    listing.photo_score = score
+                    listing.final_score = self._compute_final(listing)
 
         parts = [f"📸 {scored} gescoord"]
         if skipped_epc:
@@ -180,7 +198,7 @@ Respond ONLY valid JSON, no markdown:
                 "max_tokens": 300,
                 "temperature": 0.2,
             },
-            timeout=30,
+            timeout=15,
         )
 
         data = resp.json()
