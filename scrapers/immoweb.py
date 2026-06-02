@@ -28,6 +28,13 @@ class ImmowebScraper(BaseScraper):
     REQUEST_DELAY = 2.0
     MAX_PAGES = 3
 
+    @staticmethod
+    def _detect_property_type(title: str = "", description: str = "") -> str:
+        combined = (title + " " + description).lower()
+        if "appartement" in combined or "apartment" in combined:
+            return "apartment"
+        return "house"
+
     def __init__(self):
         super().__init__()
         self._current_postal = _FALLBACK_POSTAL
@@ -216,6 +223,7 @@ class ImmowebScraper(BaseScraper):
                 description="",
                 image_urls=images,
                 surface_m2=surface,
+                property_type=self._detect_property_type(display_title, ""),
                 lot_surface_m2=lot_surface,
                 epc_label=epc,
             )
@@ -338,6 +346,7 @@ class ImmowebScraper(BaseScraper):
                 description="",
                 image_urls=[image_url] if image_url else [],
                 surface_m2=surface,
+                property_type=self._detect_property_type(title, ""),
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse HTML card: {e}")
@@ -421,6 +430,7 @@ class ImmowebScraper(BaseScraper):
                 image_urls=images,
                 surface_m2=surface,
                 lot_surface_m2=lot_surface,
+                property_type=self._detect_property_type(display_title, ""),
                 epc_label=epc,
             )
         except Exception as e:
@@ -572,6 +582,7 @@ class ImmowebScraper(BaseScraper):
                 url=url if url.startswith("http") else f"https://www.immoweb.be{url}",
                 description=actual.get("description", ""),
                 image_urls=[actual["image"]] if actual.get("image") else [],
+                property_type=self._detect_property_type(display_title, actual.get("description", "")),
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse JSON listing: {e}")
