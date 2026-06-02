@@ -105,6 +105,8 @@ class ZimmoScraper(BaseScraper):
                 continue
 
             address = self._extract_address_from_text(text)
+            # Fix huisnummer dat tegen postcode plakt
+            address = re.sub(r'(\d+)(\d{4})\s', r'\1 \2', address)
             bedrooms = self._extract_bedrooms(container)
             if bedrooms and bedrooms < MIN_BEDROOMS:
                 continue
@@ -324,16 +326,39 @@ class ZimmoScraper(BaseScraper):
                 return None
 
             title_el = card.select_one("h2, h3, [class*='title'], .property-title")
-            title = title_el.get_text(strip=True) if title_el else ""
+            title = title_el.get_text(separator=' ', strip=True) if title_el else ""
             price_el = card.select_one("[class*='price'], .property-price")
             price = self._parse_price(price_el.get_text(strip=True)) if price_el else 0
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
             addr_el = card.select_one("[class*='address'], [class*='location'], .property-location")
             address = addr_el.get_text(separator=' ', strip=True) if addr_el else TARGET_CITY.capitalize()
-            # gebruik adres als titel ipv "Huis te koop"
-            if not title or title in ("Huis te koop", "House"):
-                title = f"Te koop: {address}"
+            # Fix 1: Split huisnummer van postcode (bv. "1582440" → "158 2440")
+            address = re.sub(r'(\d+)(\d{4})\s', r'\1 \2', address)
+            # Fix 2: Split straat van postcode (bv. "Stationsstraat2440" → "Stationsstraat 2440")
+            address = re.sub(r'([^\d\s])(\d{4})\b', r'\1 \2', address)
+            # Titels die geen straatnaam/huisnummer bevatten overschrijven met adres
+            def _is_generic_title(t: str) -> bool:
+                """Check of titel alleen placeholder is zonder straatnaam"""
+                if not t:
+                    return True
+                known_generic = {"huis te koop", "house", "te koop", "house for sale", "koopwoning", ""}
+                if t.strip().lower() in known_generic:
+                    return True
+                # Geen enkel cijfer = geen huisnummer → generic
+                return not bool(re.search(r'\d', t))
+
+            if _is_generic_title(title):
+                # Format: "Klavet 14 — 2440 GEEL"
+                parts = address.split(" ", 1) if " " in address else [address, ""]
+                street_part = parts[0]
+                rest = parts[1] if len(parts) > 1 else ""
+                # Extract postcode/city uit rest
+                pc_match = re.search(r'(\d{4})\s+(.+)$', rest)
+                if pc_match:
+                    title = f"{street_part} — {pc_match.group(2).upper()}"
+                else:
+                    title = f"Te koop in {address}"
             bedrooms = self._extract_bedrooms(card)
             surface = self._extract_surface(card)
             lot_surface = self._extract_lot_surface(card)

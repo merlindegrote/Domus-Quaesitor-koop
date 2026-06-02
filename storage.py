@@ -196,9 +196,9 @@ def iso_week_key(value: date | datetime | None = None) -> str:
 
 
 def week_label(week_key: str) -> str:
-    """Return a user-facing label from an ISO week key."""
+    """Return a user-facing label from an ISO week key in het Nederlands."""
     year, week = week_key.split("-W", maxsplit=1)
-    return f"Week {int(week)} of {year}"
+    return f"Week {int(week)} van {year}"
 
 
 def weekly_report_already_sent(history: dict, week_key: str) -> bool:

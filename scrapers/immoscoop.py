@@ -384,11 +384,28 @@ class ImmoscoopScraper(BaseScraper):
             # Surface
             surface = self._extract_surface(card)
 
-            # Image
-            img = card.select_one("img[src], img[data-src]")
+            # Image — probeer meerdere attributen en fallback op figure/picture
+            img = card.select_one("img")
             image_url = ""
             if img:
-                image_url = img.get("src") or img.get("data-src") or ""
+                for attr in ["src", "data-src", "data-srcset", "srcset"]:
+                    val = img.get(attr, "")
+                    if val:
+                        if " " in val:
+                            val = val.split(" ")[0]  # srcset = "url 1x, url2 2x"
+                        image_url = val
+                        break
+            if not image_url:
+                # Fallback: check figure/picture elementen
+                fig = card.select_one("figure img, picture img")
+                if fig:
+                    for attr in ["src", "data-src", "data-srcset", "srcset"]:
+                        val = fig.get(attr, "")
+                        if val:
+                            if " " in val:
+                                val = val.split(" ")[0]
+                            image_url = val
+                            break
 
             return Listing(
                 id=listing_id,
