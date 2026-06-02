@@ -190,6 +190,69 @@ def og_image_fallback(listings):
             ld["image_urls"] = photos
     return listings
 
+def _enrich_from_description(listings):
+    """Universele backstop: extraheer missende velden uit beschrijving.
+    
+    Vangt EPC, oppervlakte, perceelgrootte, slaapkamers die in de
+    beschrijving staan maar niet in gestructureerde API/HTML data.
+    """
+    import re as _re
+    
+    updated = 0
+    for ld in listings:
+        desc = ld.get("description") or ""
+        
+        # 1. EPC label
+        if not ld.get("epc_label"):
+            m = _re.search(
+                r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-E][+-]?)\b"
+                r"|energie(?:label|prestatie)[\s:-]*([A-E][+-]?)\b"
+                r"|energielabel[\s:-]*([A-E][+-]?)\b"
+                r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-E][+-]?)\b",
+                desc, _re.I
+            )
+            if m:
+                label = next(g for g in m.groups() if g)
+                ld["epc_label"] = label.upper().replace("+", "+")
+                updated += 1
+        
+        # 2. Bewoonbare oppervlakte (surface_m2)
+        if not ld.get("surface_m2"):
+            # "180m² woonoppervlakte", "bewoonbare opp. 120 m²", "woonoppervlakte van 95 m2"
+            m = _re.search(
+                r"(?:woon|bewoonbare|leef)?\s*(?:opp|oppervlakte|oppervlak)\s*(?:van\s*)?(\d+)\s*m[²2]"
+                r"|(\d+)\s*m[²2]\s*(?:woon|bewoonbare|leef)?\s*(?:opp|oppervlakte|oppervlak)",
+                desc, _re.I
+            )
+            if m:
+                val = next(g for g in m.groups() if g)
+                ld["surface_m2"] = int(val)
+                updated += 1
+        
+        # 3. Perceeloppervlakte (lot_surface_m2)
+        if not ld.get("lot_surface_m2"):
+            m = _re.search(
+                r"(?:perceel|grond|kavel)\s*(?:opp|oppervlakte|grootte|oppervlak)?\s*(?:van\s*)?(\d+)\s*m[²2]",
+                desc, _re.I
+            )
+            if m and m.group(1):
+                ld["lot_surface_m2"] = int(m.group(1))
+                updated += 1
+        
+        # 4. Slaapkamers (bedrooms)
+        if not ld.get("bedrooms"):
+            # "3 slaapkamers", "4 SLK", "2 slpk"
+            m = _re.search(r"(\d+)\s*slaapkamer(?:s)?\b|(\d+)\s*SLK\b|(\d+)\s*slpk\b", desc, _re.I)
+            if m:
+                val = next(g for g in m.groups() if g)
+                ld["bedrooms"] = int(val)
+                updated += 1
+    
+    if updated:
+        print(f"  📋 {updated} velden uit beschrijving geëxtraheerd")
+    return listings
+
+
 def detect_status(listings):
     """Backstop: detecteer 'onder optie' en 'lijfrente' uit beschrijvingen voor alle platforms"""
     for ld in listings:
@@ -373,29 +436,9 @@ def main():
                 print(f"  ⚠ Fout bij zimmo enrich {ld.get('id')}: {exc}")
         print(f"  ✅ Zimmo enrich gedaan")
     
-    # 3f. Universele EPC backstop — zoek EPC in beschrijving als gestructureerde data mist
-    missing_epc = [ld for ld in all_listings if not ld.get("epc_label")]
-    if missing_epc:
-        import re as _re
-        epc_found = 0
-        for ld in missing_epc:
-            desc = ld.get("description") or ""
-            # EPC label patronen: "EPC-waarde: A", "EPC: B", "energielabel C", "EPC D"
-            m = _re.search(
-                r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-E][+-]?)\b"
-                r"|energie(?:label|prestatie)[\s:-]*([A-E][+-]?)\b"
-                r"|energielabel[\s:-]*([A-E][+-]?)\b"
-                r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-E][+-]?)\b",
-                desc, _re.I
-            )
-            if m:
-                label = next(g for g in m.groups() if g)
-                ld["epc_label"] = label.upper().replace("+", "+")
-                epc_found += 1
-        if epc_found:
-            print(f"  📋 EPC uit beschrijving gehaald: {epc_found}/{len(missing_epc)} overgeslagen")
+    # 3f. Universele enrich — extraheer missende velden uit beschrijving
+    all_listings = _enrich_from_description(all_listings)
 
-    # 4. Dedup
     unique_listings = dedup_listings(all_listings)
     print(f"🔍 Na dedup: {len(unique_listings)} (verwijderd: {len(all_listings) - len(unique_listings)})")
     
