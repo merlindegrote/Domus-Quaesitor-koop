@@ -92,8 +92,14 @@ def _merge_listings(a: dict, b: dict) -> dict:
     # Duid platform als multi
     plat_a = a.get("platform", "")
     plat_b = b.get("platform", "")
-    if plat_a != plat_b:
-        merged["platform"] = f"{plat_a}+{plat_b}"
+    platform_parts = set()
+    for p in [plat_a, plat_b]:
+        for part in p.split("+"):
+            part = part.strip()
+            if part:
+                platform_parts.add(part)
+    if len(platform_parts) > 1:
+        merged["platform"] = "+".join(sorted(platform_parts))
         # Beste URL (langste = meest specifiek)
         if len(b.get("url","")) > len(a.get("url","")):
             merged["url"] = b["url"]
@@ -287,8 +293,13 @@ def main():
     if status_count:
         print(f"📋 Status badges: {status_count} (onder optie / lijfrente)")
 
-    # 3c. Enrich Immoweb listings die nog "House" in titel hebben
-    house_listings = [l for l in all_listings if l.get("platform") == "immoweb" and "House" in (l.get("title") or "")]
+    # 3c. Enrich Immoweb listings die nog geen straat in titel hebben
+    house_listings = [l for l in all_listings 
+                      if l.get("platform") == "immoweb" 
+                      and ("House" in (l.get("title") or "") 
+                           or "Te koop: Geel" in (l.get("title") or "")
+                           or not l.get("address", "").strip()
+                           or l.get("address", "").strip() == "2440 Geel")]
     if house_listings:
         print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
         immoweb = ImmowebScraper()
