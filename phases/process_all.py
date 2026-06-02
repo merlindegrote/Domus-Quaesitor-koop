@@ -403,7 +403,7 @@ def main():
     # 5b. Photo scoring via OpenRouter + Gemini 3.5 Flash
     print(f"\n📸 Photo scoring ({len(scored)} listings)...")
     try:
-        from scoring.photo_scorer import PhotoScorer, compute_final_scores
+        from scoring.photo_scorer import PhotoScorer
         photo_scorer = PhotoScorer()
         if photo_scorer.is_available:
             listing_objects = [dict_to_listing(ld) for _, ld in scored]

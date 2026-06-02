@@ -1,4 +1,11 @@
-"""AI photo scoring using OpenRouter (Gemini 3.5 Flash vision) for house quality."""
+"""AI photo scoring using OpenRouter (Gemini 3.5 Flash vision) for house quality.
+
+Cost optimization:
+  - Enkel top 25 listings scoren (na text scoring, wat in email komt)
+  - Alle fotos van 1 huis in 1 API call (max 8 fotos, zelfde prijs als 1)
+  - Geen delay tussen calls (OpenRouter heeft geen rate limit probleem)
+  - Max 1 retry (niet blijven proberen als het faalt)
+"""
 
 from __future__ import annotations
 
@@ -6,94 +13,89 @@ import json
 import logging
 import os
 import re
-import time
 
 from scrapers.base import Listing
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_SCORE = 5.0
-
 OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions"
 
 
 class PhotoScorer:
-    """Score listing photos for house quality via OpenRouter + Gemini 3.5 Flash."""
+    """Score listing photos via OpenRouter + Gemini 3.5 Flash."""
 
     MODEL = "google/gemini-3.5-flash"
-    MAX_PHOTOS = 3
-    MAX_RETRIES = 2
-    RETRY_DELAY = 3
+    MAX_PHOTOS = 8          # alle fotos in 1 call
+    SCORE_TOP_N = 25        # enkel de top-N na text scoring
+    MAX_RETRIES = 1
+    RETRY_DELAY = 2
 
-    PROMPT = """Rate the quality and condition of this house on a scale of 1-10.
+    PROMPT = """Rate the quality of this house 1-10 based on these photos.
 
-Scoring criteria (1-10):
-- 9-10: Excellent condition, modern finishes, spacious, well-maintained
-- 7-8: Good condition, updated, clean, well-cared for
-- 5-6: Average, some modern but also dated elements, acceptable
-- 3-4: Dated interior/exterior, needs work, basic quality
-- 1-2: Very old, poor condition, needs full renovation
+1-2: very old/dirty, full renovation needed
+3-4: dated, needs work
+5-6: average, some modern touches
+7-8: good condition, clean, well-maintained
+9-10: excellent, modern, high quality finishes
 
-Respond with ONLY valid JSON, no markdown:
-{"photo_score": <number 1-10>, "reasoning": "<brief observation in Dutch>"}"""
+Respond ONLY valid JSON, no markdown:
+{"photo_score": number, "reasoning": "korte observatie in Nederlands"}"""
 
     def __init__(self):
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
-        self.client_available = False
-
-        if self.api_key:
-            self.client_available = True
-            logger.info("✅ OpenRouter photo scorer initialized (Gemini 3.5 Flash)")
-        else:
-            logger.warning("⚠️ OPENROUTER_API_KEY not set, photo scoring disabled")
+        self.client_available = bool(self.api_key)
+        if self.client_available:
+            logger.info(f"📸 OpenRouter scorer: top {self.SCORE_TOP_N}, max {self.MAX_PHOTOS} fotos/call")
 
     @property
     def is_available(self) -> bool:
         return self.client_available
 
     def score_listing(self, listing: Listing) -> float | None:
-        if not self.is_available:
-            return None
-
-        image_urls = [
-            url for url in listing.image_urls[:self.MAX_PHOTOS]
-            if url and url.startswith("http") and not self._is_placeholder(url)
-        ]
-
-        if not image_urls:
-            logger.debug(f"[photo_scorer] No valid images for {listing.platform}:{listing.id}")
+        """Score 1 listing. Returns None if no valid images."""
+        urls = [u for u in listing.image_urls[:self.MAX_PHOTOS]
+                if u.startswith("http") and not self._is_placeholder(u)]
+        if not urls:
             return None
 
         for attempt in range(self.MAX_RETRIES + 1):
             try:
-                score = self._call_openrouter(image_urls)
+                score = self._call_openrouter(urls)
                 if score is not None:
-                    logger.debug(f"[photo_scorer] {listing.platform}:{listing.id} -> {score:.1f}/10")
                     return score
-
-                logger.warning(f"[photo_scorer] Could not parse response, using default")
                 return DEFAULT_SCORE
-
             except Exception as e:
-                error_str = str(e).lower()
-                if any(x in error_str for x in ["rate_limit", "429", "quota", "insufficient_quota"]):
-                    logger.warning(f"[photo_scorer] Rate limit (attempt {attempt + 1}/{self.MAX_RETRIES + 1}): {e}")
-                    if attempt < self.MAX_RETRIES:
-                        time.sleep(self.RETRY_DELAY * (attempt + 1))
-                        continue
-                    return None
-                logger.warning(f"[photo_scorer] Failed: {e}")
+                if "rate" in str(e).lower() or "429" in str(e):
+                    logger.warning(f"Rate limit, retry {attempt + 1}")
+                    continue
+                logger.warning(f"Photo score failed: {e}")
                 if attempt < self.MAX_RETRIES:
-                    time.sleep(self.RETRY_DELAY)
                     continue
                 return None
-
         return None
 
-    def _call_openrouter(self, image_urls: list[str]) -> float | None:
-        """Call OpenRouter API with image URLs, return photo_score."""
-        import requests
+    def score_listings(self, listings: list[Listing]) -> list[Listing]:
+        """Score top N listings. Rest skipped (kostenbesparing)."""
+        if not self.is_available:
+            logger.warning("Photo scorer niet beschikbaar")
+            return listings
 
+        to_score = listings[:self.SCORE_TOP_N]
+        skipped = max(0, len(listings) - self.SCORE_TOP_N)
+
+        for i, listing in enumerate(to_score):
+            score = self.score_listing(listing)
+            listing.photo_score = score
+            listing.final_score = self._compute_final(listing)
+
+        scored = sum(1 for l in to_score if l.photo_score is not None)
+        logger.info(f"📸 {scored}/{len(to_score)} gescoord" +
+                    (f", {skipped} overgeslagen" if skipped else ""))
+        return listings
+
+    def _call_openrouter(self, image_urls: list[str]) -> float | None:
+        import requests
         content = [{"type": "text", "text": self.PROMPT}]
         for url in image_urls:
             content.append({"type": "image_url", "image_url": {"url": url}})
@@ -108,64 +110,36 @@ Respond with ONLY valid JSON, no markdown:
             json={
                 "model": self.MODEL,
                 "messages": [{"role": "user", "content": content}],
-                "max_tokens": 800,
-                "temperature": 0.3,
+                "max_tokens": 300,
+                "temperature": 0.2,
             },
             timeout=30,
         )
 
         data = resp.json()
-
         if "error" in data:
-            err = data["error"]
-            raise Exception(f"OpenRouter API error: {err.get('message', err)}")
+            raise Exception(data["error"].get("message", str(data["error"])))
 
-        text = data["choices"][0]["message"]["content"]
-        result = self._extract_json(text)
+        result = self._extract_json(data["choices"][0]["message"]["content"])
         if result:
-            score = float(result.get("photo_score", DEFAULT_SCORE))
-            return max(1.0, min(10.0, score))
-
+            return max(1.0, min(10.0, float(result.get("photo_score", 5.0))))
         return None
 
-    def score_listings(self, listings: list[Listing]) -> list[Listing]:
-        if not self.is_available:
-            logger.warning("[photo_scorer] Not available, skipping")
-            return listings
-
-        logger.info(f"[photo_scorer] Scoring {len(listings)} listings...")
-        scored = 0
-
-        for i, listing in enumerate(listings):
-            score = self.score_listing(listing)
-            if score is not None:
-                listing.photo_score = score
-                scored += 1
-            else:
-                listing.photo_score = None
-
-            if i < len(listings) - 1:
-                time.sleep(3)
-
-            logger.info(
-                f"[photo_scorer] ({i + 1}/{len(listings)}) {listing.platform}:{listing.id} -> "
-                f"{'%.1f/10' % score if score else 'skipped'}"
-            )
-
-        logger.info(f"[photo_scorer] Scored {scored}/{len(listings)}")
-        return listings
+    @staticmethod
+    def _compute_final(listing: Listing) -> float:
+        text = listing.text_score or DEFAULT_SCORE
+        photo = listing.photo_score
+        if photo is not None:
+            return round(text * 0.6 + photo * 0.4, 1)
+        return text
 
     @staticmethod
     def _extract_json(text: str) -> dict | None:
-        """Extract JSON from model response, stripping markdown fences."""
-        # Strip markdown code blocks first
         cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
-        # Try direct parse
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
             pass
-        # Try finding first JSON object with photo_score
         match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', cleaned)
         if match:
             try:
@@ -176,23 +150,5 @@ Respond with ONLY valid JSON, no markdown:
 
     @staticmethod
     def _is_placeholder(url: str) -> bool:
-        indicators = ["placeholder", "no-image", "noimage", "default", "missing", "blank", "empty", "1x1", "pixel"]
-        url_lower = url.lower()
-        return any(ind in url_lower for ind in indicators)
-
-
-def compute_final_scores(listings: list[Listing]) -> list[Listing]:
-    """
-    final_score = text_score * 0.6 + photo_score * 0.4
-    If no photo score: final_score = text_score
-    """
-    for listing in listings:
-        text = listing.text_score or DEFAULT_SCORE
-        photo = listing.photo_score
-        if photo is not None:
-            listing.final_score = text * 0.6 + photo * 0.4
-        else:
-            listing.final_score = text
-
-    listings.sort(key=lambda l: l.final_score or 0, reverse=True)
-    return listings
+        indicators = ["placeholder", "no-image", "noimage", "default", "missing", "blank", "1x1", "pixel"]
+        return any(ind in url.lower() for ind in indicators)
