@@ -373,6 +373,28 @@ def main():
                 print(f"  ⚠ Fout bij zimmo enrich {ld.get('id')}: {exc}")
         print(f"  ✅ Zimmo enrich gedaan")
     
+    # 3f. Universele EPC backstop — zoek EPC in beschrijving als gestructureerde data mist
+    missing_epc = [ld for ld in all_listings if not ld.get("epc_label")]
+    if missing_epc:
+        import re as _re
+        epc_found = 0
+        for ld in missing_epc:
+            desc = ld.get("description") or ""
+            # EPC label patronen: "EPC-waarde: A", "EPC: B", "energielabel C", "EPC D"
+            m = _re.search(
+                r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-E][+-]?)\b"
+                r"|energie(?:label|prestatie)[\s:-]*([A-E][+-]?)\b"
+                r"|energielabel[\s:-]*([A-E][+-]?)\b"
+                r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-E][+-]?)\b",
+                desc, _re.I
+            )
+            if m:
+                label = next(g for g in m.groups() if g)
+                ld["epc_label"] = label.upper().replace("+", "+")
+                epc_found += 1
+        if epc_found:
+            print(f"  📋 EPC uit beschrijving gehaald: {epc_found}/{len(missing_epc)} overgeslagen")
+
     # 4. Dedup
     unique_listings = dedup_listings(all_listings)
     print(f"🔍 Na dedup: {len(unique_listings)} (verwijderd: {len(all_listings) - len(unique_listings)})")
