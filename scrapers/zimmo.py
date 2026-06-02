@@ -123,7 +123,7 @@ class ZimmoScraper(BaseScraper):
             listings.append(Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=title_text,
+                title=f"Te koop: {address}",
                 price=price,
                 bedrooms=max(bedrooms, MIN_BEDROOMS),
                 address=address,
@@ -243,10 +243,12 @@ class ZimmoScraper(BaseScraper):
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
             image = actual.get("image", "")
+            address = (actual.get("address", {}).get("streetAddress", TARGET_CITY.capitalize())
+                         if isinstance(actual.get("address"), dict) else TARGET_CITY.capitalize())
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=actual.get("name", f"House in {TARGET_CITY.capitalize()} — €{price}"),
+                title=f"Te koop: {address}",
                 price=price,
                 bedrooms=MIN_BEDROOMS,
                 address=(actual.get("address", {}).get("streetAddress", TARGET_CITY.capitalize())
@@ -287,7 +289,7 @@ class ZimmoScraper(BaseScraper):
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get("title", item.get("name", f"House in {TARGET_CITY.capitalize()} — €{price}")),
+                title=f"Te koop: {item.get('address', item.get('location', TARGET_CITY.capitalize()))}",
                 price=price,
                 bedrooms=bedrooms,
                 address=item.get("address", item.get("location", TARGET_CITY.capitalize())),
@@ -322,13 +324,16 @@ class ZimmoScraper(BaseScraper):
                 return None
 
             title_el = card.select_one("h2, h3, [class*='title'], .property-title")
-            title = title_el.get_text(strip=True) if title_el else f"House in {TARGET_CITY.capitalize()}"
+            title = title_el.get_text(strip=True) if title_el else ""
             price_el = card.select_one("[class*='price'], .property-price")
             price = self._parse_price(price_el.get_text(strip=True)) if price_el else 0
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
             addr_el = card.select_one("[class*='address'], [class*='location'], .property-location")
-            address = addr_el.get_text(strip=True) if addr_el else TARGET_CITY.capitalize()
+            address = addr_el.get_text(separator=' ', strip=True) if addr_el else TARGET_CITY.capitalize()
+            # gebruik adres als titel ipv "Huis te koop"
+            if not title or title in ("Huis te koop", "House"):
+                title = f"Te koop: {address}"
             bedrooms = self._extract_bedrooms(card)
             surface = self._extract_surface(card)
             lot_surface = self._extract_lot_surface(card)
@@ -360,13 +365,21 @@ class ZimmoScraper(BaseScraper):
 
     @staticmethod
     def _extract_id_from_url(url: str) -> str:
-        match = re.search(r"/([A-Z0-9]{5,})/?$", url)
+        """Extract Zimmo listing ID uit URL.
+        ID zit in path als /huis/LNWKX/ of /huis/LNWKX?params...
+        """
+        # Strip query params en trailing slash
+        clean_url = url.split("?")[0].rstrip("/")
+        # Eerst: 5+ uppercase letters (Zimmo formaat: LNWKX, LOQTE)
+        match = re.search(r"/([A-Z0-9]{5,})(?:/|$)", clean_url)
         if match:
             return match.group(1)
-        match = re.search(r'/(\d{4,})', url)
+        # Dan: getallen 4+
+        match = re.search(r'/(\d{4,})(?:/|$)', clean_url)
         if match:
             return match.group(1)
-        parts = url.rstrip("/").split("/")
+        # Laatste path segment
+        parts = clean_url.split("/")
         return parts[-1] if parts else ""
 
     @staticmethod

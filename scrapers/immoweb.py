@@ -114,14 +114,20 @@ class ImmowebScraper(BaseScraper):
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
 
-            # Location
+            # Location — straat+nummer+postcode+stad
             prop = item.get("property", {})
             loc = prop.get("location", {}) if isinstance(prop, dict) else {}
-            address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
             if isinstance(loc, dict):
+                street = loc.get("street", "")
+                number = loc.get("number", "")
                 postal = loc.get("postalCode", TARGET_POSTAL_CODE)
                 locality = loc.get("locality", TARGET_CITY.capitalize())
-                address = f"{postal} {locality}"
+                if street and number:
+                    address = f"{street} {number} {postal} {locality}"
+                else:
+                    address = f"{postal} {locality}"
+            else:
+                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
 
             # Bedrooms
             bedrooms = 0
@@ -145,8 +151,22 @@ class ImmowebScraper(BaseScraper):
             if isinstance(prop, dict) and prop.get("certificates", {}).get("epcScore"):
                 epc = prop["certificates"]["epcScore"]
 
-            # Title
-            title = item.get("title", "") or f"House in {address}"
+            # Title: straat + nummer + stad (geen postcode)
+            if street and number:
+                display_title = f"{street} {number} — {locality}"
+            elif locality:
+                display_title = f"Te koop: {locality}"
+            else:
+                display_title = f"Te koop in {TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+
+            # Status detectie uit search API flags
+            status = None
+            flags = item.get("flags", {}) if isinstance(item.get("flags"), dict) else {}
+            flag_main = flags.get("main", "")
+            if flag_main == "under_option":
+                status = "under_option"
+            elif flag_main == "life_annuity":
+                status = "life_annuity"
 
             # URL
             url = f"https://www.immoweb.be/en/classified/house/for-sale/{listing_id}"
@@ -166,7 +186,8 @@ class ImmowebScraper(BaseScraper):
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=f"{title} — {address}",
+                status=status,
+                title=display_title,
                 price=price,
                 bedrooms=bedrooms,
                 address=address,
@@ -182,6 +203,7 @@ class ImmowebScraper(BaseScraper):
             return None
 
     def _scrape_search_page(self, url: str) -> list[Listing]:
+        """Parse a single search results page (HTML fallback)."""
         """Parse a single search results page (HTML fallback)."""
         response = self._get_with_fallback(url)
         if not response:
@@ -249,6 +271,10 @@ class ImmowebScraper(BaseScraper):
 
             title = link.get_text(strip=True) or "House"
 
+            # Als title enkel "House" is, probeer via address data
+            # Address wordt later geparsed, dus na de location check
+            # (we fixen titel onderaan met address fallback)
+
             # Price
             price = 0
             price_el = card.select_one(".card--result__price, .price__formatted, [class*='price']")
@@ -261,7 +287,11 @@ class ImmowebScraper(BaseScraper):
 
             # Location
             location_el = card.select_one("[class*='information--locality'], [class*='locality'], .card__location")
-            address = location_el.get_text(strip=True) if location_el else f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+            address = location_el.get_text(separator=' ', strip=True) if location_el else f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+
+            # Vervang "House" titel met adres als we niets beters hebben
+            if title in ("House", ""):
+                title = f"Te koop: {address}"
 
             # Bedrooms and surface
             info_el = card.select_one(".card__information--property, [class*='information--property']")
@@ -316,7 +346,14 @@ class ImmowebScraper(BaseScraper):
 
             loc_data = data.get("property", {}).get("location", {})
             if isinstance(loc_data, dict):
-                address = f"{loc_data.get('postalCode', TARGET_POSTAL_CODE)} {loc_data.get('locality', TARGET_CITY.capitalize())}"
+                street = loc_data.get("street", "")
+                number = loc_data.get("number", "")
+                postal = loc_data.get("postalCode", TARGET_POSTAL_CODE)
+                locality = loc_data.get("locality", TARGET_CITY.capitalize())
+                if street and number:
+                    address = f"{street} {number} {postal} {locality}"
+                else:
+                    address = f"{postal} {locality}"
             else:
                 address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
 
@@ -346,12 +383,16 @@ class ImmowebScraper(BaseScraper):
                         if img_url:
                             images.append(img_url)
 
-            title = "House"
+            # Title: straat+nummer (geen postcode)
+            if isinstance(loc_data, dict) and street and number:
+                display_title = f"{street} {number} — {locality}"
+            else:
+                display_title = "House"
 
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=f"{title} — {address}",
+                title=display_title,
                 price=price,
                 bedrooms=bedrooms,
                 address=address,
@@ -399,6 +440,32 @@ class ImmowebScraper(BaseScraper):
                         listing.surface_m2 = self._extract_surface_from_json(data)
                     if not listing.lot_surface_m2:
                         listing.lot_surface_m2 = self._extract_lot_surface_from_json(data)
+
+                    # Status detectie
+                    if not listing.status:
+                        flags = data.get("flags", {}) if isinstance(data.get("flags"), dict) else {}
+                        flag_main = flags.get("main", "")
+                        if flag_main == "under_option":
+                            listing.status = "under_option"
+                        elif flag_main == "life_annuity":
+                            listing.status = "life_annuity"
+
+                        # Lijfrente check in beschrijving
+                        desc = listing.description or ""
+                        if "lijfrente" in desc.lower() or "levenslang" in desc.lower():
+                            listing.status = "life_annuity"
+
+                    # Titel met straat+nummer (detail page heeft betere data)
+                    prop = data.get("property", {})
+                    if isinstance(prop, dict):
+                        loc = prop.get("location", {})
+                        if isinstance(loc, dict):
+                            street = loc.get("street", "")
+                            number = loc.get("number", "")
+                            locality = loc.get("locality", "")
+                            if street and number:
+                                listing.title = f"{street} {number} — {locality}"
+
                     return listing
                 except json.JSONDecodeError:
                     pass
@@ -449,13 +516,37 @@ class ImmowebScraper(BaseScraper):
             price = int(offers.get("price", 0)) if isinstance(offers, dict) else 0
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
+
+            # Straat + nummer + stad uit JSON
+            addr_obj = actual.get("address", {})
+            if isinstance(addr_obj, dict):
+                street_addr = addr_obj.get("streetAddress", "")
+                postal = addr_obj.get("postalCode", TARGET_POSTAL_CODE)
+                locality = addr_obj.get("addressLocality", TARGET_CITY.capitalize())
+                if street_addr:
+                    address = f"{street_addr} {postal} {locality}"
+                else:
+                    address = f"{postal} {locality}"
+            else:
+                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+
+            # Title: straat+nummer (geen postcode)
+            title = actual.get("name", "") or ""
+            if isinstance(addr_obj, dict):
+                street_addr = addr_obj.get("streetAddress", "")
+                locality = addr_obj.get("addressLocality", TARGET_CITY.capitalize())
+            if street_addr:
+                display_title = f"{street_addr} — {locality}"
+            else:
+                display_title = title or f"House — €{price}"
+
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=actual.get("name", f"House — €{price}"),
+                title=display_title,
                 price=price,
                 bedrooms=MIN_BEDROOMS,
-                address=f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}",
+                address=address,
                 url=url if url.startswith("http") else f"https://www.immoweb.be{url}",
                 description=actual.get("description", ""),
                 image_urls=[actual["image"]] if actual.get("image") else [],

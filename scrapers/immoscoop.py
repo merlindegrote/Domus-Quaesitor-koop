@@ -130,11 +130,17 @@ class ImmoscoopScraper(BaseScraper):
                 if image_url:
                     image_urls.append(image_url)
 
+            address = self._extract_address_from_text(text)
+            if title_text in ("Huis te koop", "House", "Te koop"):
+                title_final = f"Te koop: {address}"
+            else:
+                # Haal een proper adres uit de ruime anchor text i.p.v. de hele blok
+                title_final = f"Te koop: {address}"
             listings.append(
                 Listing(
                     id=listing_id,
                     platform=self.PLATFORM_NAME,
-                    title=title_text,
+                    title=title_final,
                     price=price,
                     bedrooms=max(bedrooms, MIN_BEDROOMS),
                     address=self._extract_address_from_text(text),
@@ -273,13 +279,17 @@ class ImmoscoopScraper(BaseScraper):
             if not (MIN_PRICE <= price <= MAX_PRICE):
                 return None
 
+            address = self._extract_address(item)
+            title_name = item.get("name", "")
+            if not title_name or title_name in ("Huis te koop", "House", "Te koop"):
+                title_name = f"Te koop: {address}"
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get("name", f"House in {TARGET_CITY.capitalize()} — €{price}"),
+                title=title_name,
                 price=price,
                 bedrooms=MIN_BEDROOMS,
-                address=self._extract_address(item),
+                address=address,
                 url=url if url.startswith("http") else f"https://www.immoscoop.be{url}",
                 description=item.get("description", ""),
                 image_urls=[item["image"]] if item.get("image") else [],
@@ -354,7 +364,7 @@ class ImmoscoopScraper(BaseScraper):
 
             # Title
             title_el = card.select_one("h2, h3, [class*='title']")
-            title = title_el.get_text(strip=True) if title_el else f"House in {TARGET_CITY.capitalize()}"
+            title = title_el.get_text(separator=' ', strip=True) if title_el else ""
 
             # Price
             price_el = card.select_one("[class*='price'], [class*='prijs']")
@@ -364,7 +374,9 @@ class ImmoscoopScraper(BaseScraper):
 
             # Address
             addr_el = card.select_one("[class*='address'], [class*='location'], [class*='adres']")
-            address = addr_el.get_text(strip=True) if addr_el else TARGET_CITY.capitalize()
+            address = addr_el.get_text(separator=' ', strip=True) if addr_el else TARGET_CITY.capitalize()
+            if not title or title in ("Huis te koop", "House", "Te koop"):
+                title = f"Te koop: {address}"
 
             # Bedrooms
             bedrooms = self._extract_bedrooms(card)
@@ -398,11 +410,22 @@ class ImmoscoopScraper(BaseScraper):
 
     @staticmethod
     def _extract_id_from_url(url: str) -> str:
-        """Extract unique ID from URL."""
-        match = re.search(r'/(\d{4,})', url)
-        if match:
-            return match.group(1)
-        parts = url.rstrip("/").split("/")
+        """Extract unique ID from URL.
+        Immoscoop IDs zijn de laatste numerieke segmenten:
+        /te-koop/2440-geel/1137750  ->  "1137750"
+        """
+        # Strip query params
+        clean_url = url.split("?")[0].rstrip("/")
+        parts = clean_url.split("/")
+        # Zoek van achteren naar een numeriek segment (minstens 4 cijfers, geen postcode)
+        for part in reversed(parts):
+            if re.match(r'^\d{6,}$', part):
+                return part
+        # Fallback: laatste numerieke segment
+        for part in reversed(parts):
+            if re.match(r'^\d{4,}$', part) and part != TARGET_POSTAL_CODE:
+                return part
+        # Laatste segment als fallback
         return parts[-1] if parts else ""
 
     @staticmethod

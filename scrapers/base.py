@@ -44,6 +44,7 @@ class Listing:
     lot_surface_m2: Optional[int] = None
     posted_date: Optional[str] = None
     property_type: str = "house"
+    status: Optional[str] = None  # "under_option" | "life_annuity" | None
 
     # Scoring fields (populated later)
     text_score: Optional[float] = None
@@ -73,6 +74,7 @@ class Listing:
             "lot_surface_m2": self.lot_surface_m2,
             "posted_date": self.posted_date,
             "property_type": self.property_type,
+            "status": self.status,
             "text_score": self.text_score,
             "photo_score": self.photo_score,
             "final_score": self.final_score,
@@ -120,13 +122,18 @@ class BaseScraper(ABC):
 
         try:
             browser = random.choice(_IMPERSONATE_BROWSERS)
+            req_headers = {
+                "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
+            }
+            # Merge extra headers uit kwargs (bv. Accept, X-Requested-With)
+            extra_headers = kwargs.pop("headers", {})
+            if isinstance(extra_headers, dict):
+                req_headers.update(extra_headers)
             response = curl_requests.get(
                 url,
                 impersonate=browser,
                 timeout=timeout,
-                headers={
-                    "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
-                },
+                headers=req_headers,
                 **kwargs,
             )
             response.raise_for_status()

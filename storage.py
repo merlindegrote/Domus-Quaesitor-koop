@@ -87,29 +87,33 @@ def normalize_text(value: str) -> str:
     return collapsed
 
 
-def _normalize_address(address: str) -> str:
-    """Normalize address for dedup: remove postcode, spaces, lowercase."""
-    # Remove postal codes (4 digits not part of a longer number)
-    addr = re.sub(r'\s*(?<!\d)\d{4}(?!\d)\s*', ' ', address)
-    # Remove punctuation (commas, hyphens, etc.)
-    addr = re.sub(r'[,./;:\-]+', ' ', addr)
-    # Lowercase and collapse whitespace
+def _extract_street_name(address: str) -> str:
+    """Haal puur de straatnaam eruit, zonder huisnummer of postcode."""
+    addr = address
+    # Verwijder postcode + stad aan het einde: " 2440 Geel", " 2440 GEEL"
+    addr = re.sub(r'[\s,;:]*\d{4}\s+\S+\s*$', '', addr.strip())
+    # Verwijder huisnummer aan het einde (cijfers, evt met ; , / - erin)
+    addr = re.sub(r'\s+[\d,;:\-/]+\s*$', '', addr.strip())
     addr = addr.lower().strip()
-    addr = re.sub(r'\s+', '', addr)  # Remove all spaces
+    addr = re.sub(r'\s+', '', addr)
     return addr
 
 
+def _normalize_address(address: str) -> str:
+    """Normalize address for dedup."""
+    # Gebruik straatnaam (zonder huisnummer)
+    return _extract_street_name(address)
+
+
 def listing_fingerprint(listing: Listing) -> str:
-    """Stable cross-platform fingerprint for a property."""
-    address = _normalize_address(listing.address)
-    title = normalize_text(listing.title)
+    """Cross-platform fingerprint — matched op straatnaam + prijs + kamers + oppervlakte."""
+    street = _extract_street_name(listing.address)
     return "|".join(
         [
-            address[:80],
+            street[:40],
             str(listing.price or 0),
             str(listing.bedrooms or 0),
             str(listing.surface_m2 or 0),
-            title[:40],
         ]
     )
 

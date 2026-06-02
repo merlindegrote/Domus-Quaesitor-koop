@@ -74,6 +74,20 @@ def _platform_badge(platform: str) -> str:
             f'text-transform:uppercase;letter-spacing:0.5px">{html.escape(platform)}</span>')
 
 
+def _status_badge(status: str | None) -> str:
+    if not status:
+        return ""
+    badges = {
+        "under_option": ("⚖️ Onder optie", "#D97706"),
+        "life_annuity": ("🔄 Lijfrente", "#DC2626"),
+        "public_sale": ("🔨 Openbare verkoop", "#7C3AED"),
+    }
+    label, color = badges.get(status, (status.replace("_", " ").title(), "#6B7280"))
+    return (f'<span style="background:{color};color:#fff;padding:2px 8px;'
+            f'border-radius:4px;font-size:11px;font-weight:600;'
+            f'margin-left:4px">{html.escape(label)}</span>')
+
+
 def _format_price(price: int) -> str:
     """Format price like €450.000."""
     if price >= 1_000_000:
@@ -147,6 +161,7 @@ def _build_listing_cards(listings: list[Listing]) -> str:
                                     border-radius:20px;font-size:14px;font-weight:700">
                             {score_emoji} {score_display}/10</span>
                         {_platform_badge(listing.platform)}
+                        {_status_badge(listing.status)}
                     </div>
                     <h3 style="margin:0 0 4px;font-size:16px;color:#111827;font-weight:600;line-height:1.3">
                         {html.escape(_ascii_safe(title))}</h3>
@@ -238,7 +253,12 @@ def _build_daily_plain_text(listings: list[Listing], date_str: str) -> str:
         lines.append("")
         for i, l in enumerate(listings, 1):
             score = f"{l.final_score:.1f}" if l.final_score is not None else "-"
-            lines.append(f"#{i} [{score}/10] {_ascii_safe(l.title)}")
+            status = ""
+            if l.status == "under_option":
+                status = " [⚖️ ONDER OPTIE]"
+            elif l.status == "life_annuity":
+                status = " [🔄 LIJFRENTE]"
+            lines.append(f"#{i} [{score}/10]{status} {_ascii_safe(l.title)}")
             lines.append(f"    {_format_price(l.price)} - {_ascii_safe(l.address)}")
             lines.append(f"    {l.url}")
             lines.append("")
