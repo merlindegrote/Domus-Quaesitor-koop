@@ -34,7 +34,7 @@ def load_all_batches():
         sources[plat] = cnt
         for ld in data.get("listings", []):
             if isinstance(ld, dict):
-                if "property_type" not in ld:
+                if "property_type" not in ld or not ld["property_type"]:
                     ld["property_type"] = "house"
                 all_listings.append(ld)
         print(f"  {plat}: {cnt} listings")
@@ -538,7 +538,10 @@ def main():
     
     # 8. Embed images as base64 (bypass CDN hotlink blocking)
     print(f"\n📷 Afbeeldingen embedden ({len(final_listings)} listings)...")
-    final_listings = embed_images(final_listings)
+    try:
+        final_listings = embed_images(final_listings)
+    except Exception as e:
+        print(f"  ⚠ Embed error: {e}")
     
     # 9. Build + send email
     print(f"\n📧 Email bouwen & versturen...")
