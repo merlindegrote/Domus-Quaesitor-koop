@@ -11,8 +11,8 @@ TRANSACTION_TYPE = "for-sale"
 PROPERTY_TYPE = "house"
 
 # Search settings — accept only these cities
-TARGET_CITIES = ["Lier", "Ranst", "Broechem", "Emblem", "Vremde", "Wommelgem", "Kessel"]
-TARGET_POSTALS = ["2500", "2520", "2531", "2520", "2531", "2160", "2560"]
+TARGET_CITIES = ["Lier", "Ranst", "Broechem", "Emblem", "Vremde", "Wommelgem", "Kessel", "Geel"]
+TARGET_POSTALS = ["2500", "2520", "2531", "2520", "2531", "2160", "2560", "2440"]
 
 # Cities/postals to exclude (even if they match postals)
 EXCLUDE_CITIES = ["Koningshooikt", "Oelegem", "Nijlen", "Bevel"]
