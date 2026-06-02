@@ -43,8 +43,8 @@ def phase1_collect():
     
     results = []
     scrapers = [
-        ("Immoweb", "phases/run_immoweb.py", 60),
-        ("Zimmo", "phases/run_zimmo.py", 60),
+        ("Immoweb", "phases/run_immoweb.py", 180),
+        ("Zimmo", "phases/run_zimmo.py", 180),
         ("Immoscoop", "phases/run_immoscoop.py", 180),
         ("2dehands", "phases/run_2dehands.py", 60),
     ]
