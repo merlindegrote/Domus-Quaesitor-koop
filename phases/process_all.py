@@ -300,6 +300,9 @@ def main():
                            or "Te koop: Geel" in (l.get("title") or "")
                            or not l.get("address", "").strip()
                            or l.get("address", "").strip() == "2440 Geel")]
+    
+    # 3d. Enrich Immoscoop listings — detail page heeft echte fotos ipv placeholders
+    immoscoop_listings = [l for l in all_listings if l.get("platform") == "immoscoop"]
     if house_listings:
         print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
         immoweb = ImmowebScraper()
@@ -322,6 +325,22 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij enrich {ld.get('id')}: {exc}")
         print(f"  ✅ Immoweb enrich gedaan")
+    
+    # 3d. Enrich Immoscoop listings — detail page heeft echte fotos ipv placeholders
+    if immoscoop_listings:
+        print(f"🔍 Immoscoop fotos verrijken ({len(immoscoop_listings)} stuks)...")
+        immoscoop = ImmoscoopScraper()
+        for ld in immoscoop_listings:
+            try:
+                listing = dict_to_listing(ld)
+                enriched = immoscoop.enrich_listing(listing)
+                ld["description"] = enriched.description or ld.get("description", "")
+                if enriched.image_urls and len(enriched.image_urls) >= len(ld.get("image_urls", [])):
+                    # Enkel gebruiken als detail page meer/betere fotos heeft
+                    ld["image_urls"] = enriched.image_urls
+            except Exception as exc:
+                print(f"  ⚠ Fout bij immoscoop enrich {ld.get('id')}: {exc}")
+        print(f"  ✅ Immoscoop enrich gedaan")
     
     # 4. Dedup
     unique_listings = dedup_listings(all_listings)

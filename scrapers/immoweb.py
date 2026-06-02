@@ -169,7 +169,7 @@ class ImmowebScraper(BaseScraper):
                 status = "life_annuity"
 
             # URL
-            url = f"https://www.immoweb.be/en/classified/house/for-sale/{listing_id}"
+            url = f"https://www.immoweb.be/en/classified/house/for-sale/{TARGET_CITY.lower()}/{TARGET_POSTAL_CODE}/{listing_id}"
 
             # Images
             images = []
