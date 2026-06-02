@@ -185,6 +185,12 @@ class ImmoscoopScraper(BaseScraper):
             ]
 
             address = self._extract_address_from_text(text)
+
+            # Skip listings whose extracted postcode is not in TARGET_POSTALS
+            pc_in_address = re.search(r'(\d{4})', address)
+            if pc_in_address and pc_in_address.group(1) not in TARGET_POSTALS:
+                continue
+
             if title_text in ("Huis te koop", "House", "Te koop") or any(x in title_text.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
                 pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
                 if pc_match:
@@ -406,6 +412,7 @@ class ImmoscoopScraper(BaseScraper):
                 url=url if url.startswith("http") else f"https://www.immoscoop.be{url}",
                 description=item.get("description", ""),
                 image_urls=[item["image"]] if item.get("image") else [],
+                property_type=self._detect_property_type(title_name, item.get("description", "")),
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse JSON-LD: {e}")
@@ -441,10 +448,11 @@ class ImmoscoopScraper(BaseScraper):
                         images = [v for v in val[:5] if isinstance(v, str)]
                     break
 
+            title_text = item.get("title", item.get("name", f"House in {city.capitalize()} — €{price}"))
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get("title", item.get("name", f"House in {city.capitalize()} — €{price}")),
+                title=title_text,
                 price=price,
                 bedrooms=bedrooms,
                 address=item.get("address", item.get("location", city.capitalize())),
@@ -453,6 +461,7 @@ class ImmoscoopScraper(BaseScraper):
                 image_urls=images,
                 epc_label=item.get("epc", item.get("epc_label")),
                 surface_m2=self._safe_int(item.get("surface", item.get("oppervlakte"))),
+                property_type=self._detect_property_type(title_text, item.get("description", "")),
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse JSON item: {e}")
@@ -575,6 +584,7 @@ class ImmoscoopScraper(BaseScraper):
                 image_urls=[image_url] if image_url else [],
                 epc_label=epc_label,
                 surface_m2=surface,
+                property_type=self._detect_property_type(title, ""),
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] Failed to parse HTML card: {e}")
@@ -688,6 +698,14 @@ class ImmoscoopScraper(BaseScraper):
             if "€" in text and len(text) < 900:
                 return node
         return link.parent or link
+
+    @staticmethod
+    def _detect_property_type(title: str = "", description: str = "") -> str:
+        """Detect whether a listing is an apartment or house based on title+description."""
+        combined = (title + " " + description).lower()
+        if "appartement" in combined or "apartment" in combined:
+            return "apartment"
+        return "house"
 
     def _extract_address_from_text(self, text: str) -> str:
         """Extract an address from nearby card text."""
