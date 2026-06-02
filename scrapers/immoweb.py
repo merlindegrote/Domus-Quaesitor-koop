@@ -1,4 +1,7 @@
-"""Immoweb.be scraper for houses for-sale."""
+"""Immoweb.be scraper for houses for-sale.
+
+Iterates over ALL postcodes/cities from TARGET_POSTALS/TARGET_CITIES.
+"""
 
 from __future__ import annotations
 
@@ -9,9 +12,13 @@ import re
 from bs4 import BeautifulSoup
 
 from scrapers.base import BaseScraper, Listing
-from config import TARGET_POSTAL_CODE, TARGET_CITY, MIN_PRICE, MAX_PRICE, MIN_BEDROOMS
+from config import TARGET_POSTALS, TARGET_CITIES, MIN_PRICE, MAX_PRICE, MIN_BEDROOMS
 
 logger = logging.getLogger(__name__)
+
+# Fallback when instance vars aren't set (shouldn't happen in normal flow)
+_FALLBACK_POSTAL = "2520"
+_FALLBACK_CITY = "Ranst"
 
 
 class ImmowebScraper(BaseScraper):
@@ -19,53 +26,68 @@ class ImmowebScraper(BaseScraper):
 
     PLATFORM_NAME = "immoweb"
     REQUEST_DELAY = 2.0
-
-    # Search URL with filters for houses for-sale
-    SEARCH_URL = (
-        "https://www.immoweb.be/en/search/house/for-sale"
-        "?countries=BE"
-        f"&postalCodes=BE-{TARGET_POSTAL_CODE}"
-        f"&minPrice={MIN_PRICE}"
-        f"&maxPrice={MAX_PRICE}"
-        f"&minBedroomCount={MIN_BEDROOMS}"
-        "&orderBy=newest"
-        "&page={{page}}"
-    )
-
     MAX_PAGES = 3
 
-    # Immoweb search-results API
-    API_URL = (
-        "https://www.immoweb.be/en/search-results/house/for-sale"
-        "?countries=BE"
-        f"&postalCodes=BE-{TARGET_POSTAL_CODE}"
-        f"&minPrice={MIN_PRICE}"
-        f"&maxPrice={MAX_PRICE}"
-        f"&minBedroomCount={MIN_BEDROOMS}"
-        "&orderBy=newest"
-        "&page={{page}}"
-    )
+    def __init__(self):
+        super().__init__()
+        self._current_postal = _FALLBACK_POSTAL
+        self._current_city = _FALLBACK_CITY
+
+    def _search_url(self, page: int) -> str:
+        """Build search URL for current postal code."""
+        return (
+            "https://www.immoweb.be/en/search/house/for-sale"
+            "?countries=BE"
+            f"&postalCodes=BE-{self._current_postal}"
+            f"&minPrice={MIN_PRICE}"
+            f"&maxPrice={MAX_PRICE}"
+            f"&minBedroomCount={MIN_BEDROOMS}"
+            "&orderBy=newest"
+            f"&page={page}"
+        )
+
+    def _api_url(self, page: int) -> str:
+        """Build API URL for current postal code."""
+        return (
+            "https://www.immoweb.be/en/search-results/house/for-sale"
+            "?countries=BE"
+            f"&postalCodes=BE-{self._current_postal}"
+            f"&minPrice={MIN_PRICE}"
+            f"&maxPrice={MAX_PRICE}"
+            f"&minBedroomCount={MIN_BEDROOMS}"
+            "&orderBy=newest"
+            f"&page={page}"
+        )
 
     def scrape(self) -> list[Listing]:
-        """Scrape Immoweb search results across multiple pages."""
-        listings = []
+        """Scrape Immoweb search results across all postcodes and pages."""
+        all_listings = []
+        for postal_code, city in zip(TARGET_POSTALS, TARGET_CITIES):
+            self._current_postal = postal_code
+            self._current_city = city
+            city_listings = self._scrape_city()
+            logger.info(f"[{self.PLATFORM_NAME}] {city} ({postal_code}): {len(city_listings)} listings")
+            all_listings.extend(city_listings)
+        return all_listings
 
+    def _scrape_city(self) -> list[Listing]:
+        """Scrape one city across multiple pages."""
+        listings = []
         for page in range(1, self.MAX_PAGES + 1):
-            url = self.SEARCH_URL.format(page=page)
             page_listings = self._scrape_via_api(page)
             if not page_listings:
+                url = self._search_url(page)
                 page_listings = self._scrape_search_page(url)
             if not page_listings:
                 logger.info(f"[{self.PLATFORM_NAME}] No more results on page {page}")
                 break
             listings.extend(page_listings)
             logger.info(f"[{self.PLATFORM_NAME}] Page {page}: {len(page_listings)} listings")
-
         return listings
 
     def _scrape_via_api(self, page: int) -> list[Listing]:
         """Try Immoweb's search API which returns JSON."""
-        api_url = self.API_URL.format(page=page)
+        api_url = self._api_url(page)
         try:
             response = self._rate_limited_get(api_url, headers={
                 "Accept": "application/json",
@@ -87,6 +109,8 @@ class ImmowebScraper(BaseScraper):
 
     def _parse_api_result(self, item: dict) -> Listing | None:
         """Parse a listing from Immoweb's API JSON response."""
+        postal = self._current_postal
+        city = self._current_city
         try:
             listing_id = str(item.get("id", ""))
             if not listing_id:
@@ -117,14 +141,14 @@ class ImmowebScraper(BaseScraper):
             if isinstance(loc, dict):
                 street = loc.get("street", "")
                 number = loc.get("number", "")
-                postal = loc.get("postalCode", TARGET_POSTAL_CODE)
-                locality = loc.get("locality", TARGET_CITY.capitalize())
+                p = loc.get("postalCode", postal)
+                locality = loc.get("locality", city.capitalize())
                 if street and number:
-                    address = f"{street} {number} {postal} {locality}"
+                    address = f"{street} {number} {p} {locality}"
                 else:
-                    address = f"{postal} {locality}"
+                    address = f"{p} {locality}"
             else:
-                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+                address = f"{postal} {city.capitalize()}"
 
             # Bedrooms
             bedrooms = 0
@@ -154,7 +178,7 @@ class ImmowebScraper(BaseScraper):
             elif locality:
                 display_title = f"Te koop: {locality}"
             else:
-                display_title = f"Te koop in {TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+                display_title = f"Te koop in {postal} {city.capitalize()}"
 
             # Status detectie uit search API flags
             status = None
@@ -166,7 +190,7 @@ class ImmowebScraper(BaseScraper):
                 status = "life_annuity"
 
             # URL
-            url = f"https://www.immoweb.be/en/classified/house/for-sale/{TARGET_CITY.lower()}/{TARGET_POSTAL_CODE}/{listing_id}"
+            url = f"https://www.immoweb.be/en/classified/house/for-sale/{city.lower()}/{postal}/{listing_id}"
 
             # Images
             images = []
@@ -201,7 +225,6 @@ class ImmowebScraper(BaseScraper):
 
     def _scrape_search_page(self, url: str) -> list[Listing]:
         """Parse a single search results page (HTML fallback)."""
-        """Parse a single search results page (HTML fallback)."""
         response = self._get_with_fallback(url)
         if not response:
             logger.warning(f"[{self.PLATFORM_NAME}] Failed to fetch search page")
@@ -235,6 +258,8 @@ class ImmowebScraper(BaseScraper):
 
     def _parse_html_card(self, card: BeautifulSoup) -> Listing | None:
         """Parse a listing from Immoweb HTML card."""
+        postal = self._current_postal
+        city = self._current_city
         try:
             link = card.select_one("a.card__title-link")
             if not link:
@@ -268,10 +293,6 @@ class ImmowebScraper(BaseScraper):
 
             title = link.get_text(strip=True) or "House"
 
-            # Als title enkel "House" is, probeer via address data
-            # Address wordt later geparsed, dus na de location check
-            # (we fixen titel onderaan met address fallback)
-
             # Price
             price = 0
             price_el = card.select_one(".card--result__price, .price__formatted, [class*='price']")
@@ -284,7 +305,7 @@ class ImmowebScraper(BaseScraper):
 
             # Location
             location_el = card.select_one("[class*='information--locality'], [class*='locality'], .card__location")
-            address = location_el.get_text(separator=' ', strip=True) if location_el else f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+            address = location_el.get_text(separator=' ', strip=True) if location_el else f"{postal} {city.capitalize()}"
 
             # Vervang "House" titel met adres als we niets beters hebben
             if title in ("House", ""):
@@ -324,6 +345,8 @@ class ImmowebScraper(BaseScraper):
 
     def _parse_click_data(self, data: dict, href: str) -> Listing | None:
         """Parse listing from @click JSON data."""
+        postal = self._current_postal
+        city = self._current_city
         try:
             listing_id = str(data.get("id", ""))
             if not listing_id:
@@ -345,14 +368,14 @@ class ImmowebScraper(BaseScraper):
             if isinstance(loc_data, dict):
                 street = loc_data.get("street", "")
                 number = loc_data.get("number", "")
-                postal = loc_data.get("postalCode", TARGET_POSTAL_CODE)
-                locality = loc_data.get("locality", TARGET_CITY.capitalize())
+                p = loc_data.get("postalCode", postal)
+                locality = loc_data.get("locality", city.capitalize())
                 if street and number:
-                    address = f"{street} {number} {postal} {locality}"
+                    address = f"{street} {number} {p} {locality}"
                 else:
-                    address = f"{postal} {locality}"
+                    address = f"{p} {locality}"
             else:
-                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+                address = f"{postal} {city.capitalize()}"
 
             prop_data = data.get("property", {})
             bedrooms = int(prop_data.get("bedroomCount", 0)) if isinstance(prop_data, dict) else 0
@@ -500,6 +523,8 @@ class ImmowebScraper(BaseScraper):
 
     def _parse_json_listing(self, item: dict) -> Listing | None:
         """Parse a listing from JSON-LD."""
+        postal = self._current_postal
+        city = self._current_city
         try:
             actual = item.get("item", item) if isinstance(item, dict) else item
             listing_id = str(actual.get("id", ""))
@@ -518,20 +543,20 @@ class ImmowebScraper(BaseScraper):
             addr_obj = actual.get("address", {})
             if isinstance(addr_obj, dict):
                 street_addr = addr_obj.get("streetAddress", "")
-                postal = addr_obj.get("postalCode", TARGET_POSTAL_CODE)
-                locality = addr_obj.get("addressLocality", TARGET_CITY.capitalize())
+                p = addr_obj.get("postalCode", postal)
+                locality = addr_obj.get("addressLocality", city.capitalize())
                 if street_addr:
-                    address = f"{street_addr} {postal} {locality}"
+                    address = f"{street_addr} {p} {locality}"
                 else:
-                    address = f"{postal} {locality}"
+                    address = f"{p} {locality}"
             else:
-                address = f"{TARGET_POSTAL_CODE} {TARGET_CITY.capitalize()}"
+                address = f"{postal} {city.capitalize()}"
 
             # Title: straat+nummer (geen postcode)
             title = actual.get("name", "") or ""
             if isinstance(addr_obj, dict):
                 street_addr = addr_obj.get("streetAddress", "")
-                locality = addr_obj.get("addressLocality", TARGET_CITY.capitalize())
+                locality = addr_obj.get("addressLocality", city.capitalize())
             if street_addr:
                 display_title = f"{street_addr} — {locality}"
             else:

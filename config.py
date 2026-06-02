@@ -12,14 +12,14 @@ PROPERTY_TYPE = "house"
 
 # Search settings — accept only these cities
 TARGET_CITIES = ["Geel", "Lier", "Ranst", "Broechem", "Emblem", "Vremde", "Wommelgem", "Kessel"]
-TARGET_POSTALS = ["2440", "2500", "2520", "2531", "2160", "2560"]
+TARGET_POSTALS = ["2440", "2500", "2520", "2531", "2520", "2531", "2160", "2560"]
 
 # Cities/postals to exclude (even if they match postals)
 EXCLUDE_CITIES = ["Koningshooikt", "Oelegem", "Nijlen", "Bevel"]
 
 # Fallback for single-city operations
-TARGET_CITY = os.environ.get("TARGET_CITY", "Geel").strip()
-TARGET_POSTAL_CODE = os.environ.get("TARGET_POSTAL_CODE", "2440").strip()
+TARGET_CITY = os.environ.get("TARGET_CITY", "Ranst").strip()
+TARGET_POSTAL_CODE = os.environ.get("TARGET_POSTAL_CODE", "2520").strip()
 
 try:
     MIN_PRICE = int(os.environ.get("MIN_PRICE", "400000"))

@@ -86,7 +86,7 @@ class ZimmoScraper(BaseScraper):
             if "Huis te koop" not in title_text:
                 continue
             # Skip appartments
-            if "Appartement" in title_text:
+            if "appartement" in title_text.lower():
                 continue
             href = link.get("href", "")
             if not href:
@@ -266,8 +266,10 @@ class ZimmoScraper(BaseScraper):
     def _parse_json_item(self, item: dict) -> Listing | None:
         try:
             # Skip appartments
+            if item.get("type") != "house":
+                return None
             title_val = item.get("title", item.get("name", ""))
-            if "Appartement" in title_val:
+            if "appartement" in title_val.lower():
                 return None
 
             listing_id = str(item.get("id", ""))
@@ -310,7 +312,16 @@ class ZimmoScraper(BaseScraper):
         try:
             # Skip appartments
             card_text = card.get_text(" ", strip=True)
-            if "Appartement" in card_text:
+            if "appartement" in card_text.lower():
+                return None
+
+            title_el = card.select_one("h2, h3, [class*='title'], .property-title")
+            title = title_el.get_text(separator=' ', strip=True) if title_el else ""
+
+            # Fallback: check title + description for appartement
+            description_el = card.select_one("[class*='description'], [class*='desc'], [class*='type'], p")
+            description_text = description_el.get_text(separator=' ', strip=True) if description_el else ""
+            if "appartement" in (title + " " + description_text).lower():
                 return None
 
             link = card.find("a", href=True)
