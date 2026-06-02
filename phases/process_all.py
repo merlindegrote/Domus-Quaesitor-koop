@@ -6,7 +6,7 @@ from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from storage import Listing, listing_fingerprint, load_history, save_history
+from storage import Listing, listing_fingerprint, listing_full_fingerprint, load_history, save_history
 from scoring.text_scorer import TextScorer
 from email_sender.digest import send_digest
 from config import ACCEPT_CITIES
@@ -41,21 +41,30 @@ def load_all_batches():
     return all_listings, sources
 
 def dedup_listings(listings):
-    """Dedup + merge:zelfde huis = 1 entry met beste info uit alle bronnen."""
+    """Dedup + merge:zelfde huis = 1 entry met beste info uit alle bronnen.
+    
+    Stappen:
+    1. Eerst op volledig adres (met huisnummer) — want in 1 straat staan meerdere huizen
+    2. Fallback op straatnaam als adres geen huisnummer heeft
+    """
     seen = {}
+    merged_ids = set()
     for ld in listings:
         try:
             listing = dict_to_listing(ld)
-            fp = listing_fingerprint(listing)
+            fp = listing_full_fingerprint(listing)
+            # Als volledig adres geen huisnummer heeft, val terug naar straatnaam
+            if not any(c.isdigit() for c in fp.split("|")[0]):
+                fp = listing_fingerprint(listing)
         except Exception:
             fp = f"{ld.get('address','')}|{ld.get('price',0)}|{ld.get('bedrooms',0)}|{ld.get('surface_m2',0)}"
             fp = fp.replace(" ", "").lower()
         
         if fp in seen:
-            # Merge: behoud beste info uit beide entries
             existing = seen[fp]
             merged = _merge_listings(existing, ld)
             seen[fp] = merged
+            merged_ids.add(ld.get("id"))
         else:
             seen[fp] = ld
     
@@ -341,6 +350,28 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij immoscoop enrich {ld.get('id')}: {exc}")
         print(f"  ✅ Immoscoop enrich gedaan")
+    
+    # 3e. Enrich Zimmo listings — detail page voor straat+nummer
+    zimmo_listings = [l for l in all_listings if l.get("platform") == "zimmo" and (
+        "Huis te koop" in (l.get("title") or "") or not l.get("address","").strip()
+    )]
+    if zimmo_listings:
+        print(f"🔍 Zimmo adressen verrijken ({len(zimmo_listings)} stuks)...")
+        zimmo = ZimmoScraper()
+        for ld in zimmo_listings:
+            try:
+                listing = dict_to_listing(ld)
+                enriched = zimmo.enrich_listing(listing)
+                if enriched:
+                    ld["address"] = enriched.address or ld.get("address", "")
+                    ld["title"] = enriched.title or ld.get("title", "")
+                    ld["description"] = enriched.description or ld.get("description", "")
+                    ld["epc_label"] = enriched.epc_label or ld.get("epc_label")
+                    if enriched.image_urls and len(enriched.image_urls) >= len(ld.get("image_urls", [])):
+                        ld["image_urls"] = enriched.image_urls
+            except Exception as exc:
+                print(f"  ⚠ Fout bij zimmo enrich {ld.get('id')}: {exc}")
+        print(f"  ✅ Zimmo enrich gedaan")
     
     # 4. Dedup
     unique_listings = dedup_listings(all_listings)

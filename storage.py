@@ -118,6 +118,17 @@ def listing_fingerprint(listing: Listing) -> str:
     )
 
 
+def listing_full_fingerprint(listing: Listing) -> str:
+    """Fingerprint op volledig adres (met huisnummer) ipv enkel straatnaam."""
+    addr = (listing.address or "").strip().lower()
+    # Verwijder postcode+stad voor de pure straat+nummer
+    addr_clean = re.sub(r'\s+\d{4}\s+[a-z\s-]+$', '', addr).strip()
+    price = listing.price or 0
+    beds = max(listing.bedrooms or 0, 1)
+    surf = listing.surface_m2 or 0
+    return f"{addr_clean}|{price}|{beds}|{surf}"
+
+
 def build_sent_index(history: dict, legacy_seen_ids: set[str]) -> tuple[set[str], set[str]]:
     """Return sent unique keys and cross-platform fingerprints."""
     sent_unique_keys = set(legacy_seen_ids)

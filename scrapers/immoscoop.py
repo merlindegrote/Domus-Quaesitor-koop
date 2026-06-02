@@ -121,21 +121,46 @@ class ImmoscoopScraper(BaseScraper):
             if bedrooms and bedrooms < MIN_BEDROOMS:
                 continue
 
+            # Image — probeer meerdere selectoren en attributen
             image_urls: list[str] = []
+            img_attrs = ("src", "data-src", "data-lazy", "data-original", "data-srcset", "srcset")
             img = container.select_one("img[src], img[data-src]")
             if img:
-                image_url = img.get("src") or img.get("data-src") or ""
-                if image_url and not image_url.startswith("http"):
-                    image_url = f"https://www.immoscoop.be{image_url}"
-                if image_url:
-                    image_urls.append(image_url)
+                for attr in img_attrs:
+                    val = img.get(attr, "")
+                    if val:
+                        if " " in val:
+                            val = val.split(" ")[0]
+                        image_urls = [val]
+                        break
+
+            if not image_urls:
+                # Fallback: alle img tags
+                all_imgs = container.find_all("img")
+                for img_tag in all_imgs:
+                    for attr in ("src", "data-src", "data-lazy", "data-original"):
+                        val = img_tag.get(attr, "")
+                        if val and "placeholder" not in val.lower():
+                            image_urls = [val]
+                            break
+                    if image_urls:
+                        break
+
+            # Relative URL fix
+            if image_urls and image_urls[0].startswith("//"):
+                image_urls[0] = f"https:{image_urls[0]}"
 
             address = self._extract_address_from_text(text)
-            if title_text in ("Huis te koop", "House", "Te koop"):
-                title_final = f"Te koop: {address}"
+            if title_text in ("Huis te koop", "House", "Te koop") or any(x in title_text.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
+                pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
+                if pc_match:
+                    street_part = pc_match.group(1).strip()
+                    city_part = pc_match.group(3).upper()
+                    title_final = f"{street_part} — {city_part}"
+                else:
+                    title_final = f"Te koop: {address}"
             else:
-                # Haal een proper adres uit de ruime anchor text i.p.v. de hele blok
-                title_final = f"Te koop: {address}"
+                title_final = title_text
             listings.append(
                 Listing(
                     id=listing_id,
@@ -375,8 +400,14 @@ class ImmoscoopScraper(BaseScraper):
             # Address
             addr_el = card.select_one("[class*='address'], [class*='location'], [class*='adres']")
             address = addr_el.get_text(separator=' ', strip=True) if addr_el else TARGET_CITY.capitalize()
-            if not title or title in ("Huis te koop", "House", "Te koop"):
-                title = f"Te koop: {address}"
+            if not title or any(x in title.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
+                pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
+                if pc_match:
+                    street_part = pc_match.group(1).strip()
+                    city_part = pc_match.group(3).upper()
+                    title = f"{street_part} — {city_part}"
+                else:
+                    title = f"Te koop: {address}"
 
             # Bedrooms
             bedrooms = self._extract_bedrooms(card)
@@ -423,6 +454,21 @@ class ImmoscoopScraper(BaseScraper):
                             image_url = val
                             break
 
+            # EPC label — scan card text voor laatste letter A-F
+            epc_label = None
+            card_text = card.get_text(" ", strip=True)
+            epc_match = re.search(r'\b([A-F])\s*$', card_text)
+            if epc_match:
+                epc_label = epc_match.group(1).upper()
+
+            # Ook check in specifieke classes
+            epc_el = card.select_one("[class*='epc'], [class*='energie'], [class*='label']")
+            if epc_el:
+                epc_text = epc_el.get_text(strip=True)
+                epc_match2 = re.search(r'\b([A-F][+-]?)\b', epc_text)
+                if epc_match2:
+                    epc_label = epc_match2.group(1).upper()
+
             # Relative URL fix (bv. "//cdn.immoscoop.be/...")
             if image_url and image_url.startswith("//"):
                 image_url = f"https:{image_url}"
@@ -437,6 +483,7 @@ class ImmoscoopScraper(BaseScraper):
                 url=href,
                 description="",
                 image_urls=[image_url] if image_url else [],
+                epc_label=epc_label,
                 surface_m2=surface,
             )
         except Exception as e:
