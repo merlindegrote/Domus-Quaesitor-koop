@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -121,6 +122,21 @@ def enrich_listings(listings: list[Listing]) -> list[Listing]:
             if scraper and hasattr(scraper, "enrich_listing"):
                 logger.info("Enriching %s:%s...", listing.platform, listing.id)
                 scraper.enrich_listing(listing)
+
+    # Universal fallback: fetch og:image for any listing without photos
+    import urllib.request
+    for listing in listings:
+        if not listing.image_urls:
+            logger.info("Fetching og:image for %s:%s...", listing.platform, listing.id)
+            try:
+                req = urllib.request.Request(listing.url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    html = resp.read().decode("utf-8", errors="ignore")
+                    match = re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html)
+                    if match:
+                        listing.image_urls = [match.group(1)]
+            except Exception:
+                pass
 
     return listings
 
