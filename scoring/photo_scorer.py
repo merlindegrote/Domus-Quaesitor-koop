@@ -1,10 +1,11 @@
-"""AI photo scoring using OpenRouter (Gemini 3.5 Flash vision) for house quality.
+"""AI photo scoring using OpenRouter (Gemini 2.5 Flash Lite) for house quality.
 
 Cost optimization:
   - Enkel top 25 listings scoren (na text scoring, wat in email komt)
   - Alle fotos van 1 huis in 1 API call (max 8 fotos, zelfde prijs als 1)
   - Geen delay tussen calls (OpenRouter heeft geen rate limit probleem)
   - Max 1 retry (niet blijven proberen als het faalt)
+  - EPC D/E/F/G overslaan (slecht energielabel = slechte foto's gegarandeerd)
 """
 
 from __future__ import annotations
@@ -21,11 +22,14 @@ logger = logging.getLogger(__name__)
 DEFAULT_SCORE = 5.0
 OPENROUTER_BASE = "https://openrouter.ai/api/v1/chat/completions"
 
+# EPC-labels die we overslaan — geen credits verspillen aan bouwvallig
+_BAD_EPC = {"d", "e", "f", "g", "h"}
+
 
 class PhotoScorer:
-    """Score listing photos via OpenRouter + Gemini 3.5 Flash."""
+    """Score listing photos via OpenRouter + Gemini 2.5 Flash Lite."""
 
-    MODEL = "google/gemini-3.5-flash"
+    MODEL = "google/gemini-2.5-flash-lite"
     MAX_PHOTOS = 8          # alle fotos in 1 call
     SCORE_TOP_N = 25        # enkel de top-N na text scoring
     MAX_RETRIES = 1
@@ -45,15 +49,58 @@ Respond ONLY valid JSON, no markdown:
     def __init__(self):
         self.api_key = os.environ.get("OPENROUTER_API_KEY", "")
         self.client_available = bool(self.api_key)
-        if self.client_available:
-            logger.info(f"📸 OpenRouter scorer: top {self.SCORE_TOP_N}, max {self.MAX_PHOTOS} fotos/call")
+        logger.info(f"📸 OpenRouter: {self.MODEL}, top {self.SCORE_TOP_N}, EPC D+ skip")
 
     @property
     def is_available(self) -> bool:
         return self.client_available
 
+    # ── helpers ──────────────────────────────────────────────
+
+    @staticmethod
+    def _bad_epc(epc: str | None) -> bool:
+        """Skip photo scoring for bad energy labels (D/E/F/G/H)."""
+        if not epc:
+            return False
+        epc = epc.strip().lower().replace("+", "").replace("-", "")
+        return epc in _BAD_EPC
+
+    @staticmethod
+    def _compute_final(listing: Listing) -> float:
+        text = listing.text_score or DEFAULT_SCORE
+        photo = listing.photo_score
+        if photo is not None:
+            return round(text * 0.6 + photo * 0.4, 1)
+        return text
+
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', cleaned)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        return None
+
+    @staticmethod
+    def _is_placeholder(url: str) -> bool:
+        indicators = ["placeholder", "no-image", "noimage", "default", "missing", "blank", "1x1", "pixel"]
+        return any(ind in url.lower() for ind in indicators)
+
+    # ── core ─────────────────────────────────────────────────
+
     def score_listing(self, listing: Listing) -> float | None:
-        """Score 1 listing. Returns None if no valid images."""
+        """Score 1 listing. Returns None if no valid images or bad EPC."""
+        if self._bad_epc(listing.epc_label):
+            logger.debug(f"[photo] EPC {listing.epc_label} — overslaan")
+            return None
+
         urls = [u for u in listing.image_urls[:self.MAX_PHOTOS]
                 if u.startswith("http") and not self._is_placeholder(u)]
         if not urls:
@@ -76,22 +123,42 @@ Respond ONLY valid JSON, no markdown:
         return None
 
     def score_listings(self, listings: list[Listing]) -> list[Listing]:
-        """Score top N listings. Rest skipped (kostenbesparing)."""
-        if not self.is_available:
-            logger.warning("Photo scorer niet beschikbaar")
-            return listings
-
+        """Score top N listings. EPC D/E/F/G en listings zonder fotos overgeslagen."""
         to_score = listings[:self.SCORE_TOP_N]
         skipped = max(0, len(listings) - self.SCORE_TOP_N)
+        skipped_epc = 0
+        skipped_noimg = 0
+        scored = 0
 
-        for i, listing in enumerate(to_score):
-            score = self.score_listing(listing)
+        for listing in to_score:
+            if self._bad_epc(listing.epc_label):
+                listing.photo_score = None
+                listing.final_score = self._compute_final(listing)
+                skipped_epc += 1
+                continue
+
+            valid_urls = [u for u in listing.image_urls[:self.MAX_PHOTOS]
+                          if u.startswith("http") and not self._is_placeholder(u)]
+            if not valid_urls:
+                listing.photo_score = None
+                listing.final_score = self._compute_final(listing)
+                skipped_noimg += 1
+                continue
+
+            score = self._call_openrouter(valid_urls)
             listing.photo_score = score
             listing.final_score = self._compute_final(listing)
+            if score is not None:
+                scored += 1
 
-        scored = sum(1 for l in to_score if l.photo_score is not None)
-        logger.info(f"📸 {scored}/{len(to_score)} gescoord" +
-                    (f", {skipped} overgeslagen" if skipped else ""))
+        parts = [f"📸 {scored} gescoord"]
+        if skipped_epc:
+            parts.append(f"{skipped_epc} EPC D/E/F/G overgeslagen")
+        if skipped_noimg:
+            parts.append(f"{skipped_noimg} geen fotos")
+        if skipped:
+            parts.append(f"{skipped} buiten top {self.SCORE_TOP_N}")
+        logger.info(f"  — {' | '.join(parts)}")
         return listings
 
     def _call_openrouter(self, image_urls: list[str]) -> float | None:
@@ -124,31 +191,3 @@ Respond ONLY valid JSON, no markdown:
         if result:
             return max(1.0, min(10.0, float(result.get("photo_score", 5.0))))
         return None
-
-    @staticmethod
-    def _compute_final(listing: Listing) -> float:
-        text = listing.text_score or DEFAULT_SCORE
-        photo = listing.photo_score
-        if photo is not None:
-            return round(text * 0.6 + photo * 0.4, 1)
-        return text
-
-    @staticmethod
-    def _extract_json(text: str) -> dict | None:
-        cleaned = re.sub(r'^```(?:json)?\s*|\s*```$', '', text, flags=re.MULTILINE).strip()
-        try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError:
-            pass
-        match = re.search(r'\{[^{}]*"photo_score"[^{}]*\}', cleaned)
-        if match:
-            try:
-                return json.loads(match.group(0))
-            except json.JSONDecodeError:
-                pass
-        return None
-
-    @staticmethod
-    def _is_placeholder(url: str) -> bool:
-        indicators = ["placeholder", "no-image", "noimage", "default", "missing", "blank", "1x1", "pixel"]
-        return any(ind in url.lower() for ind in indicators)
