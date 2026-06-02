@@ -1,4 +1,7 @@
-"""Immoscoop.be scraper for for-sale houses."""
+"""Immoscoop.be scraper for for-sale houses.
+
+Iterates over ALL postcodes/cities from TARGET_POSTALS/TARGET_CITIES.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +17,7 @@ from config import TARGET_POSTALS, TARGET_CITIES, MIN_PRICE, MAX_PRICE, MIN_BEDR
 
 logger = logging.getLogger(__name__)
 
+# Fallback when instance vars aren't set (shouldn't happen in normal flow)
 _FALLBACK_POSTAL = "2520"
 _FALLBACK_CITY = "Ranst"
 
@@ -32,62 +36,57 @@ class ImmoscoopScraper(BaseScraper):
         self._current_city = _FALLBACK_CITY
 
     def _search_url(self) -> str:
-        """Build search URL with current postal/city."""
+        """Build primary search URL for current city/postal."""
         return (
-            f"https://www.immoscoop.be/zoeken/te-koop/{self._current_postal}"
-            f"-{self._current_city.lower()}/huis"
+            f"https://www.immoscoop.be/zoeken/te-koop/"
+            f"{self._current_postal}-{self._current_city.lower()}/huis"
             f"?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
         )
 
     def _search_url_alt(self) -> str:
-        """Build alternative search URL (city-only) with current city."""
+        """Build alternative search URL (city-only) for current city."""
         return (
-            f"https://www.immoscoop.be/zoeken/te-koop/{self._current_city.lower()}/huis"
+            f"https://www.immoscoop.be/zoeken/te-koop/"
+            f"{self._current_city.lower()}/huis"
             f"?priceMin={MIN_PRICE}&priceMax={MAX_PRICE}"
         )
 
+    def _page_url(self, base_url: str, page: int) -> str:
+        """Build a paginated Immoscoop URL."""
+        if page <= 1:
+            return base_url
+        separator = "&" if "?" in base_url else "?"
+        return f"{base_url}{separator}page={page}"
+
     def scrape(self) -> list[Listing]:
-        """Scrape Immoscoop search results for all target postals."""
+        """Scrape Immoscoop search results across all postcodes and pages."""
         all_listings = []
-
-        for postal, city in zip(TARGET_POSTALS, TARGET_CITIES):
-            self._current_postal = postal
+        for postal_code, city in zip(TARGET_POSTALS, TARGET_CITIES):
+            self._current_postal = postal_code
             self._current_city = city
-            logger.info(f"[{self.PLATFORM_NAME}] Scraping {city} ({postal})")
-
-            found_any = False
-            for page in range(1, self.MAX_PAGES + 1):
-                page_listings = self._scrape_search_page(
-                    self._page_url(self._search_url(), page)
-                )
-                if not page_listings and page == 1:
-                    logger.info(
-                        f"[{self.PLATFORM_NAME}] Trying alternative URL for {city}"
-                    )
-                    page_listings = self._scrape_search_page(
-                        self._page_url(self._search_url_alt(), page)
-                    )
-
-                if not page_listings:
-                    logger.info(
-                        f"[{self.PLATFORM_NAME}] No more results on page {page} "
-                        f"for {city}"
-                    )
-                    break
-
-                all_listings.extend(page_listings)
-                found_any = True
-                logger.info(
-                    f"[{self.PLATFORM_NAME}] {city} page {page}: "
-                    f"{len(page_listings)} listings"
-                )
-
-            if not found_any:
-                logger.info(
-                    f"[{self.PLATFORM_NAME}] No results found for {city} ({postal})"
-                )
-
+            city_listings = self._scrape_city()
+            logger.info(f"[{self.PLATFORM_NAME}] {city} ({postal_code}): {len(city_listings)} listings")
+            all_listings.extend(city_listings)
         return all_listings
+
+    def _scrape_city(self) -> list[Listing]:
+        """Scrape one city across multiple pages."""
+        listings = []
+
+        for page in range(1, self.MAX_PAGES + 1):
+            page_listings = self._scrape_search_page(self._page_url(self._search_url(), page))
+            if not page_listings and page == 1:
+                logger.info(f"[{self.PLATFORM_NAME}] Trying alternative URL")
+                page_listings = self._scrape_search_page(self._page_url(self._search_url_alt(), page))
+
+            if not page_listings:
+                logger.info(f"[{self.PLATFORM_NAME}] No more results on page {page}")
+                break
+
+            listings.extend(page_listings)
+            logger.info(f"[{self.PLATFORM_NAME}] Page {page}: {len(page_listings)} listings")
+
+        return listings
 
     def _scrape_search_page(self, url: str) -> list[Listing]:
         """Parse a single search results page."""
@@ -129,17 +128,11 @@ class ImmoscoopScraper(BaseScraper):
 
         return self._parse_anchor_blocks(soup)
 
-    def _page_url(self, base_url: str, page: int) -> str:
-        """Build a paginated Immoscoop URL."""
-        if page <= 1:
-            return base_url
-        separator = "&" if "?" in base_url else "?"
-        return f"{base_url}{separator}page={page}"
-
     def _parse_anchor_blocks(self, soup: BeautifulSoup) -> list[Listing]:
         """Fallback parser for the current Immoscoop results layout."""
         listings: list[Listing] = []
         seen_ids: set[str] = set()
+        postal = self._current_postal
         city = self._current_city
 
         for link in soup.find_all("a", href=True):
@@ -170,7 +163,7 @@ class ImmoscoopScraper(BaseScraper):
             # Image — probeer meerdere selectoren en attributen
             image_urls: list[str] = []
             img_attrs = ("src", "data-src", "data-lazy", "data-original", "data-srcset", "srcset")
-
+            
             # Eerst door alle img tags in de container
             all_imgs = container.find_all("img")
             for img_tag in all_imgs:
@@ -192,10 +185,7 @@ class ImmoscoopScraper(BaseScraper):
             ]
 
             address = self._extract_address_from_text(text)
-            if title_text in ("Huis te koop", "House", "Te koop") or any(
-                x in title_text.lower()
-                for x in ("huis te koop", "te koop", "house", "immoscoop only")
-            ):
+            if title_text in ("Huis te koop", "House", "Te koop") or any(x in title_text.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
                 pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
                 if pc_match:
                     street_part = pc_match.group(1).strip()
@@ -216,10 +206,7 @@ class ImmoscoopScraper(BaseScraper):
                     url=href,
                     description="",
                     image_urls=image_urls,
-                    surface_m2=self._extract_surface(container),
-                    epc_label=self._extract_epc_from_text(
-                        container.get_text(" ", strip=True)
-                    ),
+                    surface_m2=self._extract_surface(container), epc_label=self._extract_epc_from_text(container.get_text(" ", strip=True)),
                 )
             )
             seen_ids.add(listing_id)
@@ -393,6 +380,7 @@ class ImmoscoopScraper(BaseScraper):
 
     def _parse_jsonld_item(self, item: dict) -> Listing | None:
         """Parse a listing from JSON-LD item."""
+        city = self._current_city
         try:
             url = item.get("url", "")
             listing_id = self._extract_id_from_url(url)
@@ -425,6 +413,7 @@ class ImmoscoopScraper(BaseScraper):
 
     def _parse_json_item(self, item: dict) -> Listing | None:
         """Parse a listing from embedded JSON."""
+        city = self._current_city
         try:
             listing_id = str(item.get("id", ""))
             if not listing_id:
@@ -455,19 +444,10 @@ class ImmoscoopScraper(BaseScraper):
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=item.get(
-                    "title",
-                    item.get(
-                        "name",
-                        f"House in {self._current_city.capitalize()} — €{price}",
-                    ),
-                ),
+                title=item.get("title", item.get("name", f"House in {city.capitalize()} — €{price}")),
                 price=price,
                 bedrooms=bedrooms,
-                address=item.get(
-                    "address",
-                    item.get("location", self._current_city.capitalize()),
-                ),
+                address=item.get("address", item.get("location", city.capitalize())),
                 url=url,
                 description=item.get("description", item.get("beschrijving", "")),
                 image_urls=images,
@@ -480,6 +460,7 @@ class ImmoscoopScraper(BaseScraper):
 
     def _parse_html_card(self, card: BeautifulSoup) -> Listing | None:
         """Parse a listing from HTML card."""
+        city = self._current_city
         try:
             # Find link
             link = card.find("a", href=True)
@@ -508,7 +489,7 @@ class ImmoscoopScraper(BaseScraper):
 
             # Address
             addr_el = card.select_one("[class*='address'], [class*='location'], [class*='adres']")
-            address = addr_el.get_text(separator=' ', strip=True) if addr_el else self._current_city.capitalize()
+            address = addr_el.get_text(separator=' ', strip=True) if addr_el else city.capitalize()
             if not title or any(x in title.lower() for x in ("huis te koop", "te koop", "house", "immoscoop only")):
                 pc_match = re.search(r'^(.+?)\s+(\d{4})\s+(.+)$', address.strip())
                 if pc_match:
@@ -601,7 +582,8 @@ class ImmoscoopScraper(BaseScraper):
 
     # --- Helper methods ---
 
-    def _extract_id_from_url(self, url: str) -> str:
+    @staticmethod
+    def _extract_id_from_url(url: str) -> str:
         """Extract unique ID from URL.
         Immoscoop IDs zijn de laatste numerieke segmenten:
         /te-koop/2440-geel/1137750  ->  "1137750"
@@ -613,26 +595,27 @@ class ImmoscoopScraper(BaseScraper):
         for part in reversed(parts):
             if re.match(r'^\d{6,}$', part):
                 return part
-        # Fallback: laatste numerieke segment, niet de huidige postcode
+        # Fallback: laatste numerieke segment
         for part in reversed(parts):
-            if re.match(r'^\d{4,}$', part) and part != self._current_postal:
+            if re.match(r'^\d{4,}$', part):
                 return part
         # Laatste segment als fallback
         return parts[-1] if parts else ""
 
-    def _extract_address(self, item: dict) -> str:
+    @staticmethod
+    def _extract_address(item: dict) -> str:
         """Extract address from JSON-LD item."""
         addr = item.get("address", {})
         if isinstance(addr, dict):
             parts = [
                 addr.get("streetAddress", ""),
                 addr.get("postalCode", ""),
-                addr.get("addressLocality", self._current_city.capitalize()),
+                addr.get("addressLocality", ""),
             ]
             return " ".join(p for p in parts if p).strip()
         if isinstance(addr, str):
             return addr
-        return self._current_city.capitalize()
+        return ""
 
     @staticmethod
     def _parse_price(text: str) -> int:
@@ -693,7 +676,8 @@ class ImmoscoopScraper(BaseScraper):
         except (ValueError, TypeError):
             return None
 
-    def _find_result_container(self, link):
+    @staticmethod
+    def _find_result_container(link):
         """Find a reasonably scoped card container for a listing link."""
         node = link
         for _ in range(6):
@@ -701,7 +685,7 @@ class ImmoscoopScraper(BaseScraper):
             if node is None:
                 break
             text = node.get_text(" ", strip=True)
-            if "€" in text and self._current_city.lower() in text.lower() and len(text) < 900:
+            if "€" in text and len(text) < 900:
                 return node
         return link.parent or link
 
@@ -711,16 +695,12 @@ class ImmoscoopScraper(BaseScraper):
         city = self._current_city
         lines = [line.strip() for line in text.splitlines() if line.strip()]
         for index, line in enumerate(lines):
-            if re.fullmatch(rf"{re.escape(postal)}\s+{re.escape(city)}", line, re.IGNORECASE):
+            if re.fullmatch(rf"{postal}\s+{re.escape(city)}", line, re.IGNORECASE):
                 if index > 0:
                     return f"{lines[index - 1]}, {line}"
                 return line
 
-        match = re.search(
-            rf"([A-ZÀ-ÿ0-9][^\n]+?)\s*({re.escape(postal)}\s+{re.escape(city)})",
-            text,
-            re.IGNORECASE,
-        )
+        match = re.search(rf"([A-ZÀ-ÿ0-9][^\n]+?)\s*({postal}\s+{re.escape(city)})", text, re.IGNORECASE)
         if match:
             return f"{match.group(1).strip()}, {match.group(2).strip()}"
 
