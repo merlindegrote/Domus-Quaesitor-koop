@@ -180,7 +180,7 @@ class ZimmoScraper(BaseScraper):
         ):
             return listing
         try:
-            response = self._rate_limited_get(listing.url)
+            response = self._rate_limited_get(listing.url, timeout=15)
             soup = BeautifulSoup(response.text, "lxml")
 
             # --- 1. Beschrijving ---

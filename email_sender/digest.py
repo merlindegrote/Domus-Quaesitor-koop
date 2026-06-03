@@ -196,7 +196,7 @@ def _build_shell(heading: str, subtitle: str, body_html: str, footer_text: str) 
 def build_html_digest(listings: list[Listing], date_str: str) -> str:
     listings = sorted(listings, key=lambda l: l.final_score or 0, reverse=True)
     count = len(listings)
-    max_show = 15
+    max_show = 50
     shown = listings[:max_show]
     footer = f"Huizen te koop | €{MIN_PRICE:,}-{MAX_PRICE:,} | min {MIN_BEDROOMS} slaapk | min {MIN_LIVING_SURFACE}m² | EPC A-C"
 

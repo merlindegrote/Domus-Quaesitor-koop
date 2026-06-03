@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json as json_mod
 import logging
+import os
 import random
-import signal
+import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -29,56 +32,25 @@ _IMPERSONATE_BROWSERS = [
 class Listing:
     """Standardized rental listing across all platforms."""
 
-    id: str                           # platform-specific unique ID
-    platform: str                     # "immoweb" | "zimmo" | "immoscoop"
+    id: str
+    platform: str
     title: str
-    price: int                        # monthly rent in EUR
+    price: float
     bedrooms: int
     address: str
-    url: str                          # direct link to listing
-    description: str                  # full description text (usually Dutch)
+    url: str
+    description: str = ""
     image_urls: list[str] = field(default_factory=list)
-    epc_label: Optional[str] = None   # energy label if available
-    surface_m2: Optional[int] = None
-    lot_surface_m2: Optional[int] = None
-    posted_date: Optional[str] = None
+    epc_label: str = ""
+    surface_m2: float = 0.0
+    lot_surface_m2: float = 0.0
+    posted_date: str = ""
     property_type: str = "house"
-    status: Optional[str] = None  # "under_option" | "life_annuity" | None
-
-    # Scoring fields (populated later)
-    text_score: Optional[float] = None
-    photo_score: Optional[float] = None
-    final_score: Optional[float] = None
-    score_reasoning: Optional[str] = None
-
-    @property
-    def unique_key(self) -> str:
-        """Unique identifier across platforms."""
-        return f"{self.platform}_{self.id}"
-
-    def to_dict(self) -> dict:
-        """Serialize for JSON storage."""
-        return {
-            "id": self.id,
-            "platform": self.platform,
-            "title": self.title,
-            "price": self.price,
-            "bedrooms": self.bedrooms,
-            "address": self.address,
-            "url": self.url,
-            "description": self.description[:500],  # truncate for storage
-            "image_urls": self.image_urls[:5],
-            "epc_label": self.epc_label,
-            "surface_m2": self.surface_m2,
-            "lot_surface_m2": self.lot_surface_m2,
-            "posted_date": self.posted_date,
-            "property_type": self.property_type,
-            "status": self.status,
-            "text_score": self.text_score,
-            "photo_score": self.photo_score,
-            "final_score": self.final_score,
-            "score_reasoning": self.score_reasoning,
-        }
+    status: str = ""
+    text_score: float = 0.0
+    photo_score: float = 0.0
+    final_score: float = 0.0
+    score_reasoning: str = ""
 
 
 class BaseScraper(ABC):
@@ -92,12 +64,12 @@ class BaseScraper(ABC):
         self._last_request_time: float = 0
 
     def _rate_limited_get(self, url: str, timeout: int = 30, **kwargs) -> requests.Response:
-        """Make a rate-limited GET request using curl_cffi with TLS impersonation.
+        """Make a rate-limited GET request via subprocess.
 
-        curl_cffi mimics a real browser's TLS fingerprint, which is the primary
-        signal Cloudflare and CloudFront use to detect bots.
-
-        Uses SIGALRM as a hard timeout to prevent curl_cffi from hanging indefinitely.
+        curl_cffi's C extension can hang in SSL/network code where Python
+        signal handlers are never delivered.  By running the curl call in a
+        separate subprocess we can kill it with OS-level SIGKILL via
+        subprocess.TimeoutExpired.
         """
         elapsed = time.time() - self._last_request_time
         delay = self.REQUEST_DELAY + random.uniform(0.5, 2.0)
@@ -109,36 +81,57 @@ class BaseScraper(ABC):
         logger.info(f"[{self.PLATFORM_NAME}] GET {url}")
         self._last_request_time = time.time()
 
-        class TimeoutError(Exception):
-            pass
+        req_headers = {
+            "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
+        }
+        extra_headers = kwargs.pop("headers", {})
+        if isinstance(extra_headers, dict):
+            req_headers.update(extra_headers)
 
-        def _handler(_signum, _frame):
-            raise TimeoutError(f"Request timed out after {timeout + 5}s")
+        runner = os.path.join(os.path.dirname(__file__), "curl_runner.py")
+        if not os.path.exists(runner):
+            raise RuntimeError(f"curl_runner.py not found at {runner}")
 
-        # Set hard alarm: timeout + 5s grace for the curl call itself
-        signal.signal(signal.SIGALRM, _handler)
-        signal.alarm(timeout + 5)
+        args = [
+            sys.executable, "-u", runner, url, str(timeout),
+            json_mod.dumps(req_headers), json_mod.dumps(kwargs),
+        ]
 
         try:
-            browser = random.choice(_IMPERSONATE_BROWSERS)
-            req_headers = {
-                "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
-            }
-            # Merge extra headers uit kwargs (bv. Accept, X-Requested-With)
-            extra_headers = kwargs.pop("headers", {})
-            if isinstance(extra_headers, dict):
-                req_headers.update(extra_headers)
-            response = curl_requests.get(
-                url,
-                impersonate=browser,
-                timeout=timeout,
-                headers=req_headers,
-                **kwargs,
+            proc = subprocess.run(
+                args,
+                capture_output=True, text=True,
+                timeout=timeout + 10,
             )
-            response.raise_for_status()
-            return response
-        finally:
-            signal.alarm(0)  # disarm
+
+            # Parse JSON output from subprocess
+            out_line = proc.stdout.strip()
+            if not out_line:
+                lines = [l for l in proc.stdout.split("\n") if l.strip()]
+                out_line = lines[-1] if lines else "{}"
+
+            result = json_mod.loads(out_line)
+
+            if result.get("ok"):
+                resp = requests.Response()
+                resp.status_code = 200
+                resp._content = result["text"].encode("utf-8")
+                resp.encoding = "utf-8"
+                return resp
+            else:
+                err_msg = result.get("err", "Unknown subprocess error")
+                raise RuntimeError(err_msg)
+
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"Request timed out after {timeout + 10}s (subprocess killed)"
+            )
+        except json_mod.JSONDecodeError:
+            raise RuntimeError(
+                f"Bad JSON from subprocess: {proc.stdout[:300]}"
+            )
+        except Exception:
+            raise
 
     def _get_with_fallback(self, url: str, **kwargs) -> requests.Response | None:
         """Fetch a URL with error handling. Returns None on failure."""
@@ -157,11 +150,9 @@ class BaseScraper(ABC):
         ...
 
     def safe_scrape(self) -> list[Listing]:
-        """Scrape with error handling — never crashes the pipeline."""
+        """Wrapper that catches and logs all exceptions during scraping."""
         try:
-            listings = self.scrape()
-            logger.info(f"[{self.PLATFORM_NAME}] ✅ Found {len(listings)} listings")
-            return listings
+            return self.scrape()
         except Exception as e:
-            logger.error(f"[{self.PLATFORM_NAME}] ❌ Scraping failed: {e}", exc_info=True)
+            logger.error(f"[{self.PLATFORM_NAME}] Scrape failed: {e}", exc_info=True)
             return []

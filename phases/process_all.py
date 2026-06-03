@@ -387,7 +387,9 @@ def main():
     if house_listings:
         print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
         immoweb = ImmowebScraper()
-        for ld in house_listings:
+        for idx, ld in enumerate(house_listings):
+            if idx > 0 and idx % 20 == 0:
+                print(f"  [{idx}/{len(house_listings)}] bezig...")
             try:
                 listing = dict_to_listing(ld)
                 enriched = immoweb.enrich_listing(listing)
@@ -406,31 +408,44 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij enrich {ld.get('id')}: {exc}")
             time.sleep(0.3)
-        print(f"  ✅ Immoweb enrich gedaan")
+        print(f"  ✅ Immoweb enrich gedaan ({len(house_listings)} stuks)")
     
     # 3d. Enrich Immoscoop listings — detail page heeft echte fotos ipv placeholders
     if immoscoop_listings:
         print(f"🔍 Immoscoop fotos verrijken ({len(immoscoop_listings)} stuks)...")
         immoscoop = ImmoscoopScraper()
-        for ld in immoscoop_listings:
+        for idx, ld in enumerate(immoscoop_listings):
+            if idx > 0 and idx % 20 == 0:
+                print(f"  [{idx}/{len(immoscoop_listings)}] immoscoop bezig...")
             try:
                 listing = dict_to_listing(ld)
                 enriched = immoscoop.enrich_listing(listing)
                 ld["description"] = enriched.description or ld.get("description", "")
                 if enriched.image_urls and len(enriched.image_urls) >= len(ld.get("image_urls", [])):
-                    # Enkel gebruiken als detail page meer/betere fotos heeft
                     ld["image_urls"] = enriched.image_urls
+                if enriched.epc_label:
+                    ld["epc_label"] = enriched.epc_label
+                if enriched.surface_m2:
+                    ld["surface_m2"] = enriched.surface_m2
+                if enriched.lot_surface_m2:
+                    ld["lot_surface_m2"] = enriched.lot_surface_m2
+                if enriched.bedrooms:
+                    ld["bedrooms"] = enriched.bedrooms
+                if enriched.price:
+                    ld["price"] = enriched.price
             except Exception as exc:
                 print(f"  ⚠ Fout bij immoscoop enrich {ld.get('id')}: {exc}")
             time.sleep(0.3)
-        print(f"  ✅ Immoscoop enrich gedaan")
+        print(f"  ✅ Immoscoop enrich gedaan ({len(immoscoop_listings)} stuks)")
     
     # 3e. Enrich Zimmo listings — detail page voor straat+nummer
     zimmo_listings = [l for l in all_listings if l.get("platform") == "zimmo"]
     if zimmo_listings:
         print(f"🔍 Zimmo adressen verrijken ({len(zimmo_listings)} stuks)...")
         zimmo = ZimmoScraper()
-        for ld in zimmo_listings:
+        for idx, ld in enumerate(zimmo_listings):
+            if idx > 0 and idx % 20 == 0:
+                print(f"  [{idx}/{len(zimmo_listings)}] zimmo bezig...")
             try:
                 listing = dict_to_listing(ld)
                 enriched = zimmo.enrich_listing(listing)
@@ -444,14 +459,16 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij zimmo enrich {ld.get('id')}: {exc}")
             time.sleep(0.3)
-        print(f"  ✅ Zimmo enrich gedaan")
+        print(f"  ✅ Zimmo enrich gedaan ({len(zimmo_listings)} stuks)")
     
     # 3f. Enrich Immovlan listings
     immovlan_listings = [l for l in all_listings if l.get("platform") == "immovlan"]
     if immovlan_listings:
         print(f"🔍 Immovlan verrijken ({len(immovlan_listings)} stuks)...")
         immovlan = ImmovlanScraper()
-        for ld in immovlan_listings:
+        for idx, ld in enumerate(immovlan_listings):
+            if idx > 0 and idx % 20 == 0:
+                print(f"  [{idx}/{len(immovlan_listings)}] immovlan bezig...")
             try:
                 listing = dict_to_listing(ld)
                 enriched = immovlan.enrich_listing(listing)
@@ -466,7 +483,7 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij immovlan enrich {ld.get('id')}: {exc}")
             time.sleep(0.3)
-        print(f"  ✅ Immovlan enrich gedaan")
+        print(f"  ✅ Immovlan enrich gedaan ({len(immovlan_listings)} stuks)")
 
     # 3g. Universele enrich — extraheer missende velden uit beschrijving
     all_listings = _enrich_from_description(all_listings)

@@ -443,7 +443,7 @@ class ImmowebScraper(BaseScraper):
             return listing
 
         try:
-            response = self._rate_limited_get(listing.url)
+            response = self._rate_limited_get(listing.url, timeout=15)
 
             # Use raw_decode to parse only the first JSON object, not everything until last } on page
             idx = response.text.find("window.classified")
