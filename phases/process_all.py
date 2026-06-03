@@ -419,7 +419,10 @@ def main():
     immoscoop_listings = [l for l in all_listings if l.get("platform") == "immoscoop"]
     if house_listings:
         print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
+        sys.stdout.flush()
         immoweb = ImmowebScraper()
+        print('DEBUG: scraper created, loop start...')
+        sys.stdout.flush()
         for idx, ld in enumerate(house_listings):
             if idx > 0 and idx % 20 == 0:
                 print(f"  [{idx}/{len(house_listings)}] bezig...")
