@@ -263,7 +263,7 @@ final_score = text_score × 0.6 + photo_score × 0.4
 ## 📧 Email Digest
 
 ### Techniek
-- **SMTP:** SSL0.OVH.NET:465 (SMTP-SSL) via OVH
+- **SMTP:** eigen SMTP server (bv. Gmail, SendGrid)
 - **Format:** Rijke HTML met inline CSS (geen externe dependencies)
 - **Encoding:** SMTPUTF8 — ondersteunt alle speciale tekens
 - **Valt terug** naar plain-text als HTML niet werkt
@@ -319,7 +319,7 @@ domus-quaesitor/
 │
 ├── email_sender/
 │   ├── __init__.py
-│   └── digest.py                # HTML builder + OVH SMTP sender
+│   └── digest.py                # HTML builder + SMTP sender
 │
 ├── phases/
 │   ├── collect.py               # Fase 1: alle 5 scrapers parallel — enkel ID's
@@ -373,8 +373,8 @@ Vul `.env` in met je eigen waarden:
 ```bash
 # --- Email (verplicht) ---
 SMTP_FROM=jouw-email@example.com
-SMTP_PASSWORD=jouw-ovh-wachtwoord
-EMAIL_TO=mail@holie.be
+SMTP_PASSWORD=jouw-smtp-wachtwoord
+EMAIL_TO=ontvanger@voorbeeld.be
 EMAIL_CC=optioneel@example.com
 
 # --- AI Scoring (optioneel — zonder = unranked) ---
@@ -399,9 +399,9 @@ CITY_EXCLUDE_LIST=Koningshooikt, Oelegem, Nijlen, Bevel
 |----------|-----------|-----------|-------------|
 | `SMTP_FROM` (`GMAIL_FROM`) | `jij@example.com` | ✅ | Afzender email |
 | `SMTP_PASSWORD` (`GMAIL_APP_PASSWORD`) | `***` | ✅ | SMTP wachtwoord |
-| `EMAIL_TO` | `mail@holie.be` | ✅ | Ontvanger |
+| `EMAIL_TO` | `ontvanger@voorbeeld.be` | ✅ | Ontvanger |
 | `EMAIL_CC` | `partner@example.com` | ⬜ | CC ontvanger |
-| `SMTP_HOST` | `ssl0.ovh.net` | ⬜ | SMTP server (default: ssl0.ovh.net) |
+| `SMTP_HOST` | `smtp.voorbeeld.com` | ⬜ | SMTP server |
 | `SMTP_PORT` | `465` | ⬜ | SMTP poort (default: 465) |
 | `SMTP_TLS` | `0` | ⬜ | STARTTLS i.p.v. SSL direct |
 | `DEEPSEEK_API_KEY` | `sk-...` | ⬜ | Voor AI text scoring |

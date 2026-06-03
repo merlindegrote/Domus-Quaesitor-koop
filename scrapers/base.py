@@ -1,7 +1,8 @@
-"""Base scraper infrastructure and Listing dataclass."""
+"""Base scraper infrastructure and Listing dataclass.
 
-from __future__ import annotations
-
+Uses a persistent curl_cffi worker subprocess to avoid per-request spawn overhead.
+"""
+import concurrent.futures
 import json as json_mod
 import logging
 import os
@@ -11,27 +12,16 @@ import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional
 
 import requests
-from curl_cffi import requests as curl_requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
-# Browser versions to impersonate (curl_cffi TLS fingerprints)
-_IMPERSONATE_BROWSERS = [
-    "chrome124",
-    "chrome123",
-    "safari17_0",
-]
+_IMPERSONATE_BROWSERS = ["chrome124", "chrome123", "safari17_0"]
 
 
 @dataclass
 class Listing:
-    """Standardized rental listing across all platforms."""
-
     id: str
     platform: str
     title: str
@@ -53,24 +43,103 @@ class Listing:
     score_reasoning: str = ""
 
 
-class BaseScraper(ABC):
-    """Base class for all rental listing scrapers."""
+class _CurlWorker:
+    """Persistent subprocess worker for curl_cffi requests.
 
+    Avoids spawning a new process for every request, reducing memory pressure.
+    One worker process handles all requests sequentially via stdin/stdout.
+    """
+
+    _instance = None
+    _proc: subprocess.Popen | None = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def start(self):
+        if self._proc is not None and self._proc.poll() is None:
+            return  # already running
+        # Kill any stale worker
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+            except Exception:
+                pass
+            self._proc = None
+        runner = os.path.join(os.path.dirname(__file__), "curl_worker.py")
+        self._proc = subprocess.Popen(
+            [sys.executable, "-u", runner, '{"Accept-Language": "nl-BE,nl;q=0.9"}'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+
+    def stop(self):
+        if self._proc and self._proc.poll() is None:
+            self._proc.stdin.write("__EXIT__\n")
+            self._proc.stdin.flush()
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._proc.kill()
+        self._proc = None
+
+    def fetch(self, url: str, timeout: int = 15) -> requests.Response:
+        self.start()
+        req_id = str(abs(hash(url + str(timeout))))
+        req = json_mod.dumps({"url": url, "timeout": timeout, "id": req_id})
+        self._proc.stdin.write(req + "\n")
+        self._proc.stdin.flush()
+
+        # Thread-based timeout (signal.alarm only works on main thread)
+        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _fut = _exec.submit(self._proc.stdout.readline)
+        try:
+            out_line = _fut.result(timeout=timeout + 15).strip()
+        except concurrent.futures.TimeoutError:
+            self.stop()
+            _exec.shutdown(wait=False)
+            raise RuntimeError(f"Request timed out after {timeout + 15}s")
+        _exec.shutdown(wait=False)
+
+        try:
+            result = json_mod.loads(out_line)
+        except json_mod.JSONDecodeError:
+            self.stop()
+            raise RuntimeError(f"Worker returned garbage: {out_line[:100]}")
+
+        if result.get("ok"):
+            filepath = result.get("file")
+            text = ""
+            if filepath and os.path.exists(filepath):
+                with open(filepath) as f:
+                    full = json_mod.load(f)
+                text = full.get("text", "")
+                try:
+                    os.unlink(filepath)
+                except OSError:
+                    pass
+            else:
+                text = result.get("text", "")
+            resp = requests.Response()
+            resp.status_code = 200
+            resp._content = text.encode("utf-8")
+            resp.encoding = "utf-8"
+            return resp
+        else:
+            raise RuntimeError(result.get("err", "Unknown error"))
+
+
+class BaseScraper(ABC):
     PLATFORM_NAME: str = "base"
-    REQUEST_DELAY: float = 1.5  # seconds between requests
+    REQUEST_DELAY: float = 1.5
     MAX_RETRIES: int = 2
 
     def __init__(self):
         self._last_request_time: float = 0
 
-    def _rate_limited_get(self, url: str, timeout: int = 30, **kwargs) -> requests.Response:
-        """Make a rate-limited GET request via subprocess.
-
-        curl_cffi's C extension can hang in SSL/network code where Python
-        signal handlers are never delivered.  By running the curl call in a
-        separate subprocess we can kill it with OS-level SIGKILL via
-        subprocess.TimeoutExpired.
-        """
+    def _rate_limited_get(self, url: str, timeout: int = 15, **kwargs) -> requests.Response:
         elapsed = time.time() - self._last_request_time
         delay = self.REQUEST_DELAY + random.uniform(0.5, 2.0)
         if elapsed < delay:
@@ -81,60 +150,15 @@ class BaseScraper(ABC):
         logger.info(f"[{self.PLATFORM_NAME}] GET {url}")
         self._last_request_time = time.time()
 
-        req_headers = {
-            "Accept-Language": "nl-BE,nl;q=0.9,en-US;q=0.8,en;q=0.7",
-        }
-        extra_headers = kwargs.pop("headers", {})
-        if isinstance(extra_headers, dict):
-            req_headers.update(extra_headers)
-
-        runner = os.path.join(os.path.dirname(__file__), "curl_runner.py")
-        if not os.path.exists(runner):
-            raise RuntimeError(f"curl_runner.py not found at {runner}")
-
-        args = [
-            sys.executable, "-u", runner, url, str(timeout),
-            json_mod.dumps(req_headers), json_mod.dumps(kwargs),
-        ]
-
         try:
-            proc = subprocess.run(
-                args,
-                capture_output=True, text=True,
-                timeout=timeout + 10,
-            )
-
-            # Parse JSON output from subprocess
-            out_line = proc.stdout.strip()
-            if not out_line:
-                lines = [l for l in proc.stdout.split("\n") if l.strip()]
-                out_line = lines[-1] if lines else "{}"
-
-            result = json_mod.loads(out_line)
-
-            if result.get("ok"):
-                resp = requests.Response()
-                resp.status_code = 200
-                resp._content = result["text"].encode("utf-8")
-                resp.encoding = "utf-8"
-                return resp
-            else:
-                err_msg = result.get("err", "Unknown subprocess error")
-                raise RuntimeError(err_msg)
-
+            return _CurlWorker().fetch(url, timeout)
         except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"Request timed out after {timeout + 10}s (subprocess killed)"
-            )
-        except json_mod.JSONDecodeError:
-            raise RuntimeError(
-                f"Bad JSON from subprocess: {proc.stdout[:300]}"
-            )
-        except Exception:
+            # Worker was killed by timeout
+            raise RuntimeError(f"Request timed out after {timeout}s")
+        except Exception as e:
             raise
 
     def _get_with_fallback(self, url: str, **kwargs) -> requests.Response | None:
-        """Fetch a URL with error handling. Returns None on failure."""
         try:
             return self._rate_limited_get(url, **kwargs)
         except Exception as e:
@@ -146,11 +170,9 @@ class BaseScraper(ABC):
 
     @abstractmethod
     def scrape(self) -> list[Listing]:
-        """Scrape listings from the platform. Returns a list of Listing objects."""
         ...
 
     def safe_scrape(self) -> list[Listing]:
-        """Wrapper that catches and logs all exceptions during scraping."""
         try:
             return self.scrape()
         except Exception as e:

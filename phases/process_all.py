@@ -19,13 +19,36 @@ from scrapers.immoscoop import ImmoscoopScraper
 from scrapers.immovlan import ImmovlanScraper
 
 def run_with_timeout(func: Callable, timeout_seconds: int = 20, *args, **kwargs) -> Any:
-    """Run func with a hard timeout via thread pool."""
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *args, **kwargs)
+    """Run func with a hard timeout via thread + subprocess.
+    
+    Critical: ThreadPoolExecutor.__exit__ calls shutdown(wait=True), which
+    BLOCKS FOREVER if a thread is stuck on a network/socket call. We use
+    a manual shutdown(False) + signal approach instead.
+    """
+    import signal
+    
+    class TimeoutError(Exception):
+        pass
+    
+    result_container = []
+    exception_container = []
+    
+    def worker():
         try:
-            return future.result(timeout=timeout_seconds)
-        except concurrent.futures.TimeoutError:
-            raise TimeoutError(f"Function timed out after {timeout_seconds}s")
+            result_container.append(func(*args, **kwargs))
+        except Exception as e:
+            exception_container.append(e)
+    
+    import threading
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout_seconds)
+    
+    if exception_container:
+        raise exception_container[0]
+    if not result_container:
+        raise TimeoutError(f"Function timed out after {timeout_seconds}s")
+    return result_container[0]
 
 
 HISTORY_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "data" / "listing_history.json"

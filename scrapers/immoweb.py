@@ -22,6 +22,7 @@ _FALLBACK_CITY = "Ranst"
 
 
 class ImmowebScraper(BaseScraper):
+    USE_SUBPROCESS = True
     """Scraper for Immoweb.be house for-sale listings."""
 
     PLATFORM_NAME = "immoweb"
