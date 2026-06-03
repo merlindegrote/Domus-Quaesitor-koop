@@ -1,14 +1,15 @@
 """Base scraper infrastructure and Listing dataclass.
 
-Uses a persistent curl_cffi worker subprocess to avoid per-request spawn overhead.
+Worker: spawn a fresh subprocess per request (curl_runner.py) for reliable
+OS-level SIGKILL when requests hang in C-level code (curl_cffi SSL/network).
 """
 import json as json_mod
 import logging
 import os
 import random
+import signal
 import subprocess
 import sys
-import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -43,107 +44,28 @@ class Listing:
     score_reasoning: str = ""
 
 
-class _CurlWorker:
-    """Persistent subprocess worker for curl_cffi requests.
+def _spawn_fetch(url: str, timeout: int = 15) -> requests.Response:
+    """Spawn a fresh subprocess to curl an URL. Returns Response on success."""
+    runner = os.path.join(os.path.dirname(__file__), "curl_runner.py")
+    headers = json_mod.dumps({"Accept-Language": "nl-BE,nl;q=0.9"})
+    kwargs = json_mod.dumps({})
+    proc = subprocess.run(
+        [sys.executable, "-u", runner, url, str(timeout), headers, kwargs],
+        capture_output=True, text=True, timeout=timeout + 10,
+    )
+    if proc.returncode != 0:
+        stderr = proc.stderr.strip()[:200]
+        raise RuntimeError(f"curl_runner rc={proc.returncode}: {stderr}")
 
-    Avoids spawning a new process for every request, reducing memory pressure.
-    One worker process handles all requests sequentially via stdin/stdout.
-    """
-
-    _instance = None
-    _proc: subprocess.Popen | None = None
-    _dirty: bool = False
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
-    def start(self):
-        if self._dirty:
-            self.stop()
-            self._dirty = False
-        if self._proc is not None and self._proc.poll() is None:
-            return  # already running
-        # Kill any stale worker
-        if self._proc is not None:
-            try:
-                self._proc.kill()
-            except Exception:
-                pass
-            self._proc = None
-        runner = os.path.join(os.path.dirname(__file__), "curl_worker.py")
-        self._proc = subprocess.Popen(
-            [sys.executable, "-u", runner, '{"Accept-Language": "nl-BE,nl;q=0.9"}'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
-        )
-
-    def stop(self):
-        if self._proc and self._proc.poll() is None:
-            self._proc.stdin.write("__EXIT__\n")
-            self._proc.stdin.flush()
-            try:
-                self._proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self._proc.kill()
-                self._proc.wait()
-        self._proc = None
-
-    def fetch(self, url: str, timeout: int = 15) -> requests.Response:
-        self.start()
-        req_id = str(abs(hash(url + str(timeout))))
-        req = json_mod.dumps({"url": url, "timeout": timeout, "id": req_id})
-        self._proc.stdin.write(req + "\n")
-        self._proc.stdin.flush()
-
-        # Daemon thread for readline timeout (avoids ThreadPoolExecutor deadlock)
-        _out_line = None
-        _exc = None
-        def _reader():
-            nonlocal _out_line, _exc
-            try:
-                _out_line = self._proc.stdout.readline()
-            except Exception as e:
-                _exc = e
-        t = threading.Thread(target=_reader, daemon=True)
-        t.start()
-        t.join(timeout=timeout + 15)
-        if t.is_alive():
-            self._dirty = True
-            self.stop()
-            raise RuntimeError(f"Request timed out after {timeout + 15}s")
-        if _exc:
-            self.stop()
-            raise RuntimeError(f"Worker read error: {_exc}")
-        out_line = (_out_line or "").strip()
-
-        try:
-            result = json_mod.loads(out_line)
-        except json_mod.JSONDecodeError:
-            self.stop()
-            raise RuntimeError(f"Worker returned garbage: {out_line[:100]}")
-
-        if result.get("ok"):
-            filepath = result.get("file")
-            text = ""
-            if filepath and os.path.exists(filepath):
-                with open(filepath) as f:
-                    full = json_mod.load(f)
-                text = full.get("text", "")
-                try:
-                    os.unlink(filepath)
-                except OSError:
-                    pass
-            else:
-                text = result.get("text", "")
-            resp = requests.Response()
-            resp.status_code = 200
-            resp._content = text.encode("utf-8")
-            resp.encoding = "utf-8"
-            return resp
-        else:
-            raise RuntimeError(result.get("err", "Unknown error"))
+    result = json_mod.loads(proc.stdout.strip())
+    if result.get("ok"):
+        resp = requests.Response()
+        resp.status_code = 200
+        resp._content = result["text"].encode("utf-8")
+        resp.encoding = "utf-8"
+        return resp
+    else:
+        raise RuntimeError(result.get("err", "Unknown error"))
 
 
 class BaseScraper(ABC):
@@ -165,13 +87,7 @@ class BaseScraper(ABC):
         logger.info(f"[{self.PLATFORM_NAME}] GET {url}")
         self._last_request_time = time.time()
 
-        try:
-            return _CurlWorker().fetch(url, timeout)
-        except subprocess.TimeoutExpired:
-            # Worker was killed by timeout
-            raise RuntimeError(f"Request timed out after {timeout}s")
-        except Exception as e:
-            raise
+        return _spawn_fetch(url, timeout)
 
     def _get_with_fallback(self, url: str, **kwargs) -> requests.Response | None:
         try:
