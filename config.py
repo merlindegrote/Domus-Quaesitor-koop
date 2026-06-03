@@ -50,8 +50,8 @@ try:
 except ValueError:
     MIN_LOT_SURFACE = 450
 
-# Skip listings that mention renovation
-SKIP_RENOVATION = os.environ.get("SKIP_RENOVATION", "true").lower() in {"1", "true", "yes", "on"}
+# Skip listings that mention renovation — DISABLED (EPC filter is sufficient)
+SKIP_RENOVATION = os.environ.get("SKIP_RENOVATION", "false").lower() in {"1", "true", "yes", "on"}
 
 # City acceptance/exclusion filter
 CITY_ACCEPT_LIST = os.environ.get("CITY_ACCEPT_LIST", "")

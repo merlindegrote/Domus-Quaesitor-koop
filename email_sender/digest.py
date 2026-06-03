@@ -119,8 +119,8 @@ def _build_listing_cards(listings: list[Listing]) -> str:
             if image_url and (image_url.startswith("http") or image_url.startswith("data:")):
                 thumbnail_html = (
                     f'<img src="{html.escape(image_url)}" alt="Listing photo" '
-                    f'style="width:100%;max-width:280px;height:180px;'
-                    f'object-fit:cover;border-radius:8px;margin-bottom:12px" />'
+                    f'style="width:100%;max-width:180px;height:100px;'
+                    f'object-fit:cover;border-radius:6px;margin-bottom:6px" />'
                 )
 
         details = []
@@ -134,48 +134,38 @@ def _build_listing_cards(listings: list[Listing]) -> str:
             details.append(f"⚡ EPC {listing.epc_label}")
         details_html = " &middot; ".join(html.escape(_ascii_safe(p)) for p in details) if details else ""
 
-        score_parts = []
-        if listing.text_score is not None:
-            score_parts.append(f"Tekst: {listing.text_score:.1f}")
-        if listing.photo_score is not None:
-            score_parts.append(f"Foto: {listing.photo_score:.1f}")
-        score_breakdown = html.escape(_ascii_safe(" | ".join(score_parts))) if score_parts else ""
+        score_breakdown = ""  # removed — final score is enough
 
         reasoning_html = ""
         if reasoning and reasoning != "AI scoring unavailable — unranked":
-            reasoning_html = (f'<p style="margin:8px 0;font-size:13px;color:#6B7280;'
-                              f'font-style:italic;line-height:1.4">'
-                              f'{html.escape(_ascii_safe(reasoning))}</p>')
+            short_r = reasoning[:100] + ("..." if len(reasoning) > 100 else "")
+            reasoning_html = (f'<p style="margin:4px 0;font-size:11px;color:#6B7280;'
+                              f'font-style:italic;line-height:1.3">'
+                              f'{html.escape(_ascii_safe(short_r))}</p>')
 
         cards_html += f"""
-        <div style="background:#fff;border-radius:12px;padding:20px;
-                    margin-bottom:16px;border:1px solid #E5E7EB;
-                    box-shadow:0 1px 3px rgba(0,0,0,0.06)">
-            <div style="display:flex;gap:16px;flex-wrap:wrap">
+        <div style="background:#fff;border-radius:8px;padding:12px;
+                    margin-bottom:8px;border:1px solid #E5E7EB;">
+            <div style="display:flex;gap:10px;flex-wrap:wrap">
                 <div style="flex-shrink:0">{thumbnail_html}</div>
-                <div style="flex:1;min-width:200px">
-                    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-                        <span style="background:#F3F4F6;color:#374151;padding:2px 10px;
-                                    border-radius:20px;font-size:13px;font-weight:700">#{index}</span>
-                        <span style="background:{score_color};color:#fff;padding:4px 12px;
-                                    border-radius:20px;font-size:14px;font-weight:700">
-                            {score_emoji} {score_display}/10</span>
+                <div style="flex:1;min-width:180px">
+                    <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;flex-wrap:wrap">
+                        <span style="background:{score_color};color:#fff;padding:2px 8px;
+                                    border-radius:12px;font-size:12px;font-weight:700">
+                            {score_emoji} {score_display}</span>
                         {_platform_badge(listing.platform)}
                         {_status_badge(listing.status)}
                     </div>
-                    <h3 style="margin:0 0 4px;font-size:16px;color:#111827;font-weight:600;line-height:1.3">
-                        {html.escape(_ascii_safe(title))}</h3>
-                    <p style="margin:0 0 6px;font-size:18px;font-weight:700;color:#059669">
-                        {_format_price(listing.price)}</p>
-                    <p style="margin:0 0 6px;font-size:13px;color:#6B7280">
+                    <p style="margin:0 0 3px;font-size:15px;font-weight:700;color:#059669;line-height:1.3">
+                        {_format_price(listing.price)} &middot; {html.escape(_ascii_safe(title))}</p>
+                    <p style="margin:0 0 3px;font-size:12px;color:#6B7280">
                         {html.escape(_ascii_safe(address))}</p>
-                    <p style="margin:0 0 4px;font-size:13px;color:#374151">{details_html}</p>
-                    <p style="margin:4px 0;font-size:11px;color:#9CA3AF">{score_breakdown}</p>
+                    <p style="margin:0 0 2px;font-size:12px;color:#374151">{details_html}</p>
                     {reasoning_html}
                     <a href="{html.escape(listing.url)}" target="_blank" rel="noopener"
-                       style="display:inline-block;margin-top:8px;padding:8px 20px;
+                       style="display:inline-block;margin-top:4px;padding:5px 14px;
                               background:#2563EB;color:#fff;text-decoration:none;
-                              border-radius:6px;font-size:13px;font-weight:600">Bekijk</a>
+                              border-radius:5px;font-size:12px;font-weight:600">Bekijk &#8599;</a>
                 </div>
             </div>
         </div>"""
@@ -187,16 +177,15 @@ def _build_shell(heading: str, subtitle: str, body_html: str, footer_text: str) 
     return f"""
     <!DOCTYPE html>
     <html lang="nl">
-    <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/></head>
-    <body style="margin:0;padding:0;background:#F9FAFB;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif">
-        <div style="max-width:640px;margin:0 auto;padding:24px 16px">
-            <div style="background:linear-gradient(135deg,#1E40AF 0%,#7C3AED 100%);
-                        border-radius:16px;padding:28px 24px;margin-bottom:24px;text-align:center">
-                <h1 style="margin:0;font-size:24px;color:#fff;font-weight:700">{html.escape(heading)}</h1>
-                <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px">{html.escape(subtitle)}</p>
+    <head><meta charset="utf-8"/></head>
+    <body style="margin:0;padding:0;background:#F9FAFB;font-family:-apple-system,sans-serif">
+        <div style="max-width:580px;margin:0 auto;padding:16px">
+            <div style="background:#1E40AF;border-radius:12px;padding:16px;margin-bottom:16px;text-align:center">
+                <h1 style="margin:0;font-size:20px;color:#fff">{html.escape(heading)}</h1>
+                <p style="margin:4px 0 0;color:rgba(255,255,255,0.85);font-size:13px">{html.escape(subtitle)}</p>
             </div>
             {body_html}
-            <div style="text-align:center;padding:20px;color:#9CA3AF;font-size:12px">
+            <div style="text-align:center;padding:12px;color:#9CA3AF;font-size:11px">
                 <p>{html.escape(footer_text)}</p>
             </div>
         </div>
@@ -205,7 +194,10 @@ def _build_shell(heading: str, subtitle: str, body_html: str, footer_text: str) 
 
 
 def build_html_digest(listings: list[Listing], date_str: str) -> str:
+    listings = sorted(listings, key=lambda l: l.final_score or 0, reverse=True)
     count = len(listings)
+    max_show = 15
+    shown = listings[:max_show]
     footer = f"Huizen te koop | €{MIN_PRICE:,}-{MAX_PRICE:,} | min {MIN_BEDROOMS} slaapk | min {MIN_LIVING_SURFACE}m² | EPC A-C"
 
     if count == 0:
@@ -221,27 +213,24 @@ def build_html_digest(listings: list[Listing], date_str: str) -> str:
     price_max = max(l.price for l in listings)
     top_score = f"{listings[0].final_score:.1f}" if listings[0].final_score is not None else "-"
 
+    more_notice = f"<p style='font-size:12px;color:#9CA3AF;text-align:center;'>Nog {count - max_show} meer...</p>" if count > max_show else ""
     body_html = f"""
-    <div style="display:flex;gap:12px;margin-bottom:20px;flex-wrap:wrap">
-        <div style="flex:1;min-width:120px;background:#fff;border-radius:10px;padding:16px;text-align:center;border:1px solid #E5E7EB">
-            <div style="font-size:28px;font-weight:700;color:#2563EB">{count}</div>
-            <div style="font-size:12px;color:#6B7280;margin-top:4px">Nieuw</div>
+    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
+        <div style="flex:1;min-width:80px;background:#fff;border-radius:8px;padding:10px;text-align:center;border:1px solid #E5E7EB">
+            <div style="font-size:22px;font-weight:700;color:#2563EB">{count}</div>
+            <div style="font-size:11px;color:#6B7280;margin-top:2px">Nieuw</div>
         </div>
-        <div style="flex:1;min-width:120px;background:#fff;border-radius:10px;padding:16px;text-align:center;border:1px solid #E5E7EB">
-            <div style="font-size:28px;font-weight:700;color:#059669">{_format_price(price_min)}-{_format_price(price_max)}</div>
-            <div style="font-size:12px;color:#6B7280;margin-top:4px">Prijsrange</div>
+        <div style="flex:1;min-width:80px;background:#fff;border-radius:8px;padding:10px;text-align:center;border:1px solid #E5E7EB">
+            <div style="font-size:16px;font-weight:700;color:#059669">{_format_price(price_min)}-{_format_price(price_max)}</div>
+            <div style="font-size:11px;color:#6B7280;margin-top:2px">Prijs</div>
         </div>
-        <div style="flex:1;min-width:120px;background:#fff;border-radius:10px;padding:16px;text-align:center;border:1px solid #E5E7EB">
-            <div style="font-size:28px;font-weight:700;color:#7C3AED">{top_score}</div>
-            <div style="font-size:12px;color:#6B7280;margin-top:4px">Top score</div>
+        <div style="flex:1;min-width:80px;background:#fff;border-radius:8px;padding:10px;text-align:center;border:1px solid #E5E7EB">
+            <div style="font-size:22px;font-weight:700;color:#7C3AED">{top_score}</div>
+            <div style="font-size:11px;color:#6B7280;margin-top:2px">Top</div>
         </div>
     </div>
-    {_build_listing_cards(listings)}
-    <p style="font-size:12px;color:#9CA3AF;text-align:center;margin-top:8px">
-        Gezocht: Geel, Lier, Ranst, Broechem, Emblem, Vremde, Wommelgem, Kessel · 
-        Uitgesloten: Koningshooikt, Oelegem, Nijlen, Bevel · 
-        Geen renovatie
-    </p>"""
+    {_build_listing_cards(shown)}
+    {more_notice}"""
 
     return _build_shell("Huizenjacht", f"{date_str} - {count} nieuwe{' huizen' if count != 1 else ' huis'} gevonden", body_html, footer)
 
