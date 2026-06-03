@@ -21,7 +21,6 @@ logger = logging.getLogger(__name__)
 _IMPERSONATE_BROWSERS = [
     "chrome124",
     "chrome123",
-    "chrome120",
     "safari17_0",
 ]
 
