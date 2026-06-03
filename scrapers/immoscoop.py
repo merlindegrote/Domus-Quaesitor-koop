@@ -225,12 +225,15 @@ class ImmoscoopScraper(BaseScraper):
         return listings
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        """Fetch detail page, extract fotos + EPC uit __NEXT_DATA__ JSON."""
-        if listing.description and len(listing.description) >= 80 and listing.epc_label:
-            return listing
+        """Fetch detail page, extract fotos + EPC uit __NEXT_DATA__ JSON.
+
+        ALWAYS fetch images — search page only returns placeholder/logo images.
+        The description/EPC guard only skips the non-image parts if already set.
+        """
 
         try:
-            response = requests.get(listing.url, timeout=(5, 10), headers={
+            # Always fetch detail page — search results only have placeholder/logo images
+            response = requests.get(listing.url, timeout=(10, 20), headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
             })
             soup = BeautifulSoup(response.text, "lxml")

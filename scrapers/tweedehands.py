@@ -106,6 +106,11 @@ class TweeDeHandsScraper(BaseScraper):
         location = raw.get("location", {})
         city_name = location.get("cityName", "")
 
+        # Skip "buitenland" (abroad) listings — search is fuzzy and returns non-local results
+        vip_url = raw.get("vipUrl", "")
+        if "/buitenland/" in vip_url or "buitenland" in city_name.lower():
+            return None
+
         from config import ACCEPT_CITIES
 
         if not any(c.lower() == city_name.lower() for c in ACCEPT_CITIES):

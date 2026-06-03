@@ -395,10 +395,10 @@ class ImmovlanScraper(BaseScraper):
     @staticmethod
     def _extract_epc(text: str) -> str | None:
         """Extract EPC label."""
-        epc = re.search(r"epc-water-mark\s*Flanders([A-E][+-]?)", text)
+        epc = re.search(r"epc-water-mark\s*Flanders([A-F][+-]?)", text)
         if epc:
             return epc.group(1)
-        epc = re.search(r"EPC[\s-]*(?:label\s*)?([A-E][+-]?)", text, re.I)
+        epc = re.search(r"EPC[\s-]*(?:label\s*)?([A-F][+-]?)", text, re.I)
         if epc:
             return epc.group(1).upper()
         return None

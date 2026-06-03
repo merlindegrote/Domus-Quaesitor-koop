@@ -109,7 +109,7 @@ def _build_listing_cards(listings: list[Listing]) -> str:
         address = _clean_text(listing.address)
         reasoning = _clean_text(listing.score_reasoning or "")
         score = listing.final_score
-        score_display = f"{score:.1f}" if score is not None else "-"
+        score_display = f"{score:.1f}/10" if score is not None else "-"
         score_color = _score_color(score)
         score_emoji = _score_emoji(score)
 
@@ -211,9 +211,9 @@ def build_html_digest(listings: list[Listing], date_str: str) -> str:
 
     price_min = min(l.price for l in listings)
     price_max = max(l.price for l in listings)
-    top_score = f"{listings[0].final_score:.1f}" if listings[0].final_score is not None else "-"
+    top_score = f"{listings[0].final_score:.1f}/10" if listings[0].final_score is not None else "-"
 
-    more_notice = f"<p style='font-size:12px;color:#9CA3AF;text-align:center;'>Nog {count - max_show} meer...</p>" if count > max_show else ""
+    more_notice = f"<p style='font-size:12px;color:#9CA3AF;text-align:center;'>Nog {count - max_show} meer — alleen top {max_show} getoond per e-mail</p>" if count > max_show else ""
     body_html = f"""
     <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap">
         <div style="flex:1;min-width:80px;background:#fff;border-radius:8px;padding:10px;text-align:center;border:1px solid #E5E7EB">

@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from storage import Listing, listing_fingerprint, listing_full_fingerprint, load_history, save_history
 from scoring.text_scorer import TextScorer
 from email_sender.digest import send_digest
-from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL
+from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL, EPC_ALLOWED, MIN_LOT_SURFACE, MIN_LIVING_SURFACE
 from phases.embed_images import embed_images
 from scrapers.immoweb import ImmowebScraper
 from scrapers.zimmo import ZimmoScraper
@@ -211,10 +211,10 @@ def _enrich_from_description(listings):
         # 1. EPC label
         if not ld.get("epc_label"):
             m = _re.search(
-                r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-E][+-]?)\b"
-                r"|energie(?:label|prestatie)[\s:-]*([A-E][+-]?)\b"
-                r"|energielabel[\s:-]*([A-E][+-]?)\b"
-                r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-E][+-]?)\b",
+                r"EPC[\s:-]*\s*(?:label\s*)?(?:waarde[\s:-]*)?([A-F][+-]?)\b"
+                r"|energie(?:label|prestatie)[\s:-]*([A-F][+-]?)\b"
+                r"|energielabel[\s:-]*([A-F][+-]?)\b"
+                r"|EPC[-\s]*(?:score|waarde)[\s:-]*\d+[\s/]*kWh[^.]*?([A-F][+-]?)\b",
                 desc, _re.I
             )
             if m:
@@ -470,6 +470,39 @@ def main():
 
     # 3g. Universele enrich — extraheer missende velden uit beschrijving
     all_listings = _enrich_from_description(all_listings)
+
+    # 3h. Quality filter — EPC, perceel, woonopp
+    before_qf = len(all_listings)
+    qf_reasons = []
+    filtered_qf = []
+    for ld in all_listings:
+        epc = (ld.get("epc_label") or "").upper().strip()
+        lot = ld.get("lot_surface_m2")
+        living = ld.get("surface_m2")
+
+        # EPC filter: skip als EPC bekend is en niet in allowed lijst
+        if epc and epc not in EPC_ALLOWED:
+            qf_reasons.append(f"  ⛔ {ld.get('id','?')}: EPC {epc} (niet in {EPC_ALLOWED})")
+            continue
+
+        # Perceel filter: skip als perceel bekend is en te klein
+        if lot is not None and lot < MIN_LOT_SURFACE:
+            qf_reasons.append(f"  ⛔ {ld.get('id','?')}: perceel {lot}m² < {MIN_LOT_SURFACE}m²")
+            continue
+
+        # Woonopp filter: skip als woonopp bekend is en te klein
+        if living is not None and living < MIN_LIVING_SURFACE:
+            qf_reasons.append(f"  ⛔ {ld.get('id','?')}: woonopp {living}m² < {MIN_LIVING_SURFACE}m²")
+            continue
+
+        filtered_qf.append(ld)
+
+    removed_qf = before_qf - len(filtered_qf)
+    if removed_qf:
+        print(f"⛔ Quality filter: {removed_qf} verwijderd")
+        for r in qf_reasons:
+            print(r)
+    all_listings = filtered_qf
 
     unique_listings = dedup_listings(all_listings)
     print(f"🔍 Na dedup: {len(unique_listings)} (verwijderd: {len(all_listings) - len(unique_listings)})")
