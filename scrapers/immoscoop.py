@@ -146,6 +146,11 @@ class ImmoscoopScraper(BaseScraper):
             if not href.startswith("http"):
                 href = f"https://www.immoscoop.be{href}"
 
+            # Skip listings whose URL postcode is not in TARGET_POSTALS
+            url_postal_match = re.search(r'/te-koop/(\d{4})[\-\w]', href)
+            if url_postal_match and url_postal_match.group(1) not in TARGET_POSTALS:
+                continue
+
             listing_id = self._extract_id_from_url(href)
             if not listing_id or listing_id in seen_ids:
                 continue
@@ -389,6 +394,10 @@ class ImmoscoopScraper(BaseScraper):
         city = self._current_city
         try:
             url = item.get("url", "")
+            # Skip listings whose URL postcode is not in TARGET_POSTALS
+            url_postal_match = re.search(r'/te-koop/(\d{4})[\-\w]', url)
+            if url_postal_match and url_postal_match.group(1) not in TARGET_POSTALS:
+                return None
             listing_id = self._extract_id_from_url(url)
             if not listing_id:
                 return None
@@ -435,6 +444,10 @@ class ImmoscoopScraper(BaseScraper):
                 return None
 
             url = item.get("url", item.get("link", ""))
+            # Skip listings whose URL postcode is not in TARGET_POSTALS
+            url_postal_match = re.search(r'/te-koop/(\d{4})[\-\w]', url)
+            if url_postal_match and url_postal_match.group(1) not in TARGET_POSTALS:
+                return None
             if url and not url.startswith("http"):
                 url = f"https://www.immoscoop.be{url}"
 
@@ -481,6 +494,11 @@ class ImmoscoopScraper(BaseScraper):
                 return None
             if not href.startswith("http"):
                 href = f"https://www.immoscoop.be{href}"
+
+            # Skip listings whose URL postcode is not in TARGET_POSTALS
+            url_postal_match = re.search(r'/te-koop/(\d{4})[\-\w]', href)
+            if url_postal_match and url_postal_match.group(1) not in TARGET_POSTALS:
+                return None
 
             listing_id = self._extract_id_from_url(href)
             if not listing_id:
