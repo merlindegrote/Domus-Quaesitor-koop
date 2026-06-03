@@ -45,12 +45,19 @@ class Listing:
 
 
 def _spawn_fetch(url: str, timeout: int = 15) -> requests.Response:
-    """Spawn a fresh subprocess to curl an URL. Returns Response on success."""
-    runner = os.path.join(os.path.dirname(__file__), "curl_runner.py")
+    """Spawn a fresh subprocess to curl an URL. Returns Response on success.
+    
+    Uses venv python when available (curl_cffi only installed in .venv).
+    """
+    base = os.path.dirname(os.path.abspath(__file__))
+    project = os.path.dirname(base)  # scrapers/ -> domus-quaesitor/
+    venv_python = os.path.join(project, ".venv", "bin", "python3")
+    python_exe = venv_python if os.path.exists(venv_python) else sys.executable
+    runner = os.path.join(base, "curl_runner.py")
     headers = json_mod.dumps({"Accept-Language": "nl-BE,nl;q=0.9"})
     kwargs = json_mod.dumps({})
     proc = subprocess.run(
-        [sys.executable, "-u", runner, url, str(timeout), headers, kwargs],
+        [python_exe, "-u", runner, url, str(timeout), headers, kwargs],
         capture_output=True, text=True, timeout=timeout + 10,
     )
     if proc.returncode != 0:
