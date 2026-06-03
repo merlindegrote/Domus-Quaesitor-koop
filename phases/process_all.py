@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Merge alle batch outputs in /tmp/domus-batches/, dedup, score, output processed JSON"""
-import sys, os, json, glob, time
+import sys, os, json, glob, time, signal
 import concurrent.futures
 from typing import Callable, Any
 from pathlib import Path
@@ -25,8 +25,6 @@ def run_with_timeout(func: Callable, timeout_seconds: int = 20, *args, **kwargs)
     BLOCKS FOREVER if a thread is stuck on a network/socket call. We use
     a manual shutdown(False) + signal approach instead.
     """
-    import signal
-    
     class TimeoutError(Exception):
         pass
     

@@ -2,13 +2,13 @@
 
 Uses a persistent curl_cffi worker subprocess to avoid per-request spawn overhead.
 """
-import concurrent.futures
 import json as json_mod
 import logging
 import os
 import random
 import subprocess
 import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -52,6 +52,7 @@ class _CurlWorker:
 
     _instance = None
     _proc: subprocess.Popen | None = None
+    _dirty: bool = False
 
     def __new__(cls):
         if cls._instance is None:
@@ -59,6 +60,9 @@ class _CurlWorker:
         return cls._instance
 
     def start(self):
+        if self._dirty:
+            self.stop()
+            self._dirty = False
         if self._proc is not None and self._proc.poll() is None:
             return  # already running
         # Kill any stale worker
@@ -83,6 +87,7 @@ class _CurlWorker:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+                self._proc.wait()
         self._proc = None
 
     def fetch(self, url: str, timeout: int = 15) -> requests.Response:
@@ -92,16 +97,26 @@ class _CurlWorker:
         self._proc.stdin.write(req + "\n")
         self._proc.stdin.flush()
 
-        # Thread-based timeout (signal.alarm only works on main thread)
-        _exec = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _fut = _exec.submit(self._proc.stdout.readline)
-        try:
-            out_line = _fut.result(timeout=timeout + 15).strip()
-        except concurrent.futures.TimeoutError:
+        # Daemon thread for readline timeout (avoids ThreadPoolExecutor deadlock)
+        _out_line = None
+        _exc = None
+        def _reader():
+            nonlocal _out_line, _exc
+            try:
+                _out_line = self._proc.stdout.readline()
+            except Exception as e:
+                _exc = e
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout + 15)
+        if t.is_alive():
+            self._dirty = True
             self.stop()
-            _exec.shutdown(wait=False)
             raise RuntimeError(f"Request timed out after {timeout + 15}s")
-        _exec.shutdown(wait=False)
+        if _exc:
+            self.stop()
+            raise RuntimeError(f"Worker read error: {_exc}")
+        out_line = (_out_line or "").strip()
 
         try:
             result = json_mod.loads(out_line)
