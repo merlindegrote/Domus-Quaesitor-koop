@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """Merge alle batch outputs in /tmp/domus-batches/, dedup, score, output processed JSON"""
 import sys, os, json, glob, time
+import concurrent.futures
+from typing import Callable, Any
 from pathlib import Path
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from storage import Listing, listing_fingerprint, listing_full_fingerprint, load_history, save_history
-from scoring.text_scorer import TextScorer
+# Scoring done via subprocess runners (deepseek_runner.py, photo_runner.py)
 from email_sender.digest import send_digest
 from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL, EPC_ALLOWED, MIN_LOT_SURFACE, MIN_LIVING_SURFACE
 from phases.embed_images import embed_images
@@ -15,6 +17,16 @@ from scrapers.immoweb import ImmowebScraper
 from scrapers.zimmo import ZimmoScraper
 from scrapers.immoscoop import ImmoscoopScraper
 from scrapers.immovlan import ImmovlanScraper
+
+def run_with_timeout(func: Callable, timeout_seconds: int = 20, *args, **kwargs) -> Any:
+    """Run func with a hard timeout via thread pool."""
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            raise TimeoutError(f"Function timed out after {timeout_seconds}s")
+
 
 HISTORY_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "data" / "listing_history.json"
 
@@ -392,7 +404,7 @@ def main():
                 print(f"  [{idx}/{len(house_listings)}] bezig...")
             try:
                 listing = dict_to_listing(ld)
-                enriched = immoweb.enrich_listing(listing)
+                enriched = run_with_timeout(immoweb.enrich_listing, timeout_seconds=25, listing=listing)
                 ld["title"] = enriched.title or ld["title"]
                 ld["description"] = enriched.description or ld.get("description", "")
                 if enriched.image_urls:
@@ -528,45 +540,121 @@ def main():
         print("❌ Geen listings na dedup.")
         return
     
-    # 5. DeepSeek scoring
+    # 5. DeepSeek scoring (subprocess for reliable timeout)
     print(f"\n🧠 DeepSeek text scoring ({len(unique_listings)} listings)...")
-    scorer = TextScorer()
+    print("  (via subprocess for reliable timeout)")
     scored = []
-    for i, ld in enumerate(unique_listings):
-        try:
-            listing = dict_to_listing(ld)
-            score, reasoning = scorer.score_listing(listing)
-            ld["text_score"] = score
-            ld["score_reasoning"] = reasoning
-            ld["final_score"] = score
-            scored.append((score or 5.0, ld))
-        except Exception as e:
-            print(f"  Score error #{i}: {e}")
+
+    # Batch all in one subprocess call
+    import subprocess, sys, json as _json
+    runner = os.path.join(os.path.dirname(__file__), "..", "scoring", "deepseek_runner.py")
+    runner = os.path.abspath(runner)
+
+    # Build minimal input per listing
+    batch_input = []
+    for ld in unique_listings:
+        batch_input.append({
+            "id": ld.get("id", ""),
+            "platform": ld.get("platform", ""),
+            "title": ld.get("title", ""),
+            "price": ld.get("price", 0),
+            "address": ld.get("address", ""),
+            "surface_m2": ld.get("surface_m2", 0),
+            "epc_label": ld.get("epc_label", ""),
+            "bedrooms": ld.get("bedrooms", 0),
+            "description": ld.get("description", ""),
+        })
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-u", runner, _json.dumps(batch_input)],
+            capture_output=True, text=True, timeout=120,
+        )
+        out_line = proc.stdout.strip()
+        if not out_line:
+            out_line = "{}"
+        result = _json.loads(out_line)
+
+        if result.get("ok"):
+            results_map = {r["id"]: r for r in result["results"]}
+            for ld in unique_listings:
+                lid = ld.get("id", "")
+                r = results_map.get(lid, {})
+                score = r.get("score", 5.0)
+                reasoning = r.get("reasoning", "AI scoring via subprocess")
+                ld["text_score"] = score
+                ld["score_reasoning"] = reasoning
+                ld["final_score"] = score
+                scored.append((score, ld))
+            print(f"  ✅ Scored {len(result['results'])} listings via subprocess")
+        else:
+            err = result.get("err", "Unknown")
+            print(f"  ⚠ DeepSeek subprocess failed: {err}, using defaults")
+            for ld in unique_listings:
+                ld["text_score"] = 5.0
+                ld["score_reasoning"] = "DeepSeek subprocess failed"
+                ld["final_score"] = 5.0
+                scored.append((5.0, ld))
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠ DeepSeek subprocess timed out after 120s, using defaults")
+        for ld in unique_listings:
+            ld["text_score"] = 5.0
+            ld["score_reasoning"] = "DeepSeek timeout"
+            ld["final_score"] = 5.0
+            scored.append((5.0, ld))
+    except Exception as e:
+        print(f"  ⚠ DeepSeek subprocess error: {e}, using defaults")
+        for ld in unique_listings:
+            ld["text_score"] = 5.0
+            ld["score_reasoning"] = f"DeepSeek error: {str(e)[:80]}"
             ld["final_score"] = 5.0
             scored.append((5.0, ld))
     
     scored.sort(key=lambda x: x[0], reverse=True)
     
-    # 5b. Photo scoring via OpenRouter + Gemini 3.5 Flash
+    # 5b. Photo scoring via subprocess (OpenRouter + Gemini 3.5 Flash)
     print(f"\n📸 Photo scoring ({len(scored)} listings)...")
+    print("  (via subprocess for reliable timeout)")
+    photo_runner = os.path.join(os.path.dirname(__file__), "..", "scoring", "photo_runner.py")
+    photo_runner = os.path.abspath(photo_runner)
+
+    batch_input = []
+    for _, ld in scored:
+        batch_input.append({
+            "id": ld.get("id", ""),
+            "title": ld.get("title", ""),
+            "price": ld.get("price", 0),
+            "surface_m2": ld.get("surface_m2", 0),
+            "epc_label": ld.get("epc_label", ""),
+            "image_urls": ld.get("image_urls", []),
+        })
+
+    photo_scored_count = 0
     try:
-        from scoring.photo_scorer import PhotoScorer
-        photo_scorer = PhotoScorer()
-        if photo_scorer.is_available:
-            listing_objects = [dict_to_listing(ld) for _, ld in scored]
-            listing_objects = photo_scorer.score_listings(listing_objects)
-            # Copy photo scores back to dict
-            photo_scored_count = 0
-            for ld, listing_obj in zip([ld for _, ld in scored], listing_objects):
-                if listing_obj.photo_score is not None:
-                    ld["photo_score"] = listing_obj.photo_score
-                    photo_scored_count += 1
-                    # Update final score: text * 0.6 + photo * 0.4
-                    text = ld.get("text_score") or 5.0
-                    ld["final_score"] = round(text * 0.6 + ld["photo_score"] * 0.4, 1)
+        proc = subprocess.run(
+            [sys.executable, "-u", photo_runner, _json.dumps(batch_input)],
+            capture_output=True, text=True, timeout=120,
+        )
+        out_line = proc.stdout.strip()
+        if not out_line:
+            out_line = "{}"
+        result = _json.loads(out_line)
+
+        if result.get("ok"):
+            results_map = {r["id"]: r for r in result["results"]}
+            for _, ld in scored:
+                lid = ld.get("id", "")
+                r = results_map.get(lid, {})
+                pscore = r.get("score", 5.0)
+                ld["photo_score"] = pscore
+                text = ld.get("text_score") or 5.0
+                ld["final_score"] = round(text * 0.6 + pscore * 0.4, 1)
+                photo_scored_count += 1
             print(f"  📸 {photo_scored_count}/{len(scored)} listings gescoord op foto's")
         else:
-            print(f"  ⬜ Photo scorer niet beschikbaar (OPENROUTER_API_KEY?)")
+            print(f"  ⬜ Photo scorer failed: {result.get('err', 'unknown')}")
+    except subprocess.TimeoutExpired:
+        print(f"  ⚠ Photo scoring timed out, using text scores only")
     except Exception as e:
         print(f"  ⚠ Photo scoring error: {e}")
     
