@@ -7,9 +7,7 @@ import json as json_mod
 import logging
 import os
 import random
-import signal
-import subprocess
-import sys
+import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -45,34 +43,36 @@ class Listing:
 
 
 def _spawn_fetch(url: str, timeout: int = 15) -> requests.Response:
-    """Spawn a fresh subprocess to curl an URL. Returns Response on success.
+    """Fetch URL using in-process requests with daemon thread timeout.
     
-    Uses venv python when available (curl_cffi only installed in .venv).
+    Replaced subprocess-based curl_runner.py (was causing hang after ~40 calls
+    due to pipe deadlock / orphan processes / FD leak). Uses a daemon thread
+    with join timeout to ensure reliable timeout even when C-level SSL/network
+    calls block the GIL.
     """
-    base = os.path.dirname(os.path.abspath(__file__))
-    project = os.path.dirname(base)  # scrapers/ -> domus-quaesitor/
-    venv_python = os.path.join(project, ".venv", "bin", "python3")
-    python_exe = venv_python if os.path.exists(venv_python) else sys.executable
-    runner = os.path.join(base, "curl_runner.py")
-    headers = json_mod.dumps({"Accept-Language": "nl-BE,nl;q=0.9"})
-    kwargs = json_mod.dumps({})
-    proc = subprocess.run(
-        [python_exe, "-u", runner, url, str(timeout), headers, kwargs],
-        capture_output=True, text=True, timeout=timeout + 10,
-    )
-    if proc.returncode != 0:
-        stderr = proc.stderr.strip()[:200]
-        raise RuntimeError(f"curl_runner rc={proc.returncode}: {stderr}")
+    result: list[requests.Response] = []
+    exception: list[Exception] = []
 
-    result = json_mod.loads(proc.stdout.strip())
-    if result.get("ok"):
-        resp = requests.Response()
-        resp.status_code = 200
-        resp._content = result["text"].encode("utf-8")
-        resp.encoding = "utf-8"
-        return resp
-    else:
-        raise RuntimeError(result.get("err", "Unknown error"))
+    def _do():
+        try:
+            headers = {"Accept-Language": "nl-BE,nl;q=0.9"}
+            sess = requests.Session()
+            sess.headers.update(headers)
+            r = sess.get(url, timeout=timeout)
+            r.raise_for_status()
+            result.append(r)
+        except Exception as e:
+            exception.append(e)
+
+    t = threading.Thread(target=_do, daemon=True)
+    t.start()
+    t.join(timeout=timeout + 10)
+
+    if exception:
+        raise exception[0]
+    if not result:
+        raise RuntimeError(f"Timeout fetching {url[:100]} after {timeout + 10}s")
+    return result[0]
 
 
 class BaseScraper(ABC):
