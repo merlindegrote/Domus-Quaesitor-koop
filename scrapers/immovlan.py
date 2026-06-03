@@ -28,10 +28,10 @@ logger = logging.getLogger(__name__)
 # "Huis te koop | [address] | [price] € | Bewoonbare opp. [surface]m² | EPC [label] | [bedrooms] Slaapkamers"
 _META_RE = re.compile(
     r"Huis\s+te\s+koop"
-    r"\s*\|\s*(?P<address>[^|]+)"
-    r"\s*\|\s*(?P<price>[\d.,\u202f\s]+)\s*\u20ac"
+    r"\s*\|\s*(?P<address>[^|]+?)\s*"
+    r"\|\s*(?P<price>[\d.,\u202f\s]+)\s*\u20ac"
     r"\s*\|\s*Bewoonbare opp\.?\s*(?P<surface>[\d.]+)\s*m[²2\u00b2]?\s*"
-    r"(?:\|\s*EPC\s*(?P<epc>[A-E][+-]?))?"
+    r"(?:\|\s*EPC\s*(?P<epc>[A-F][+-]?))?"
     r"(?:\s*\|\s*(?P<bedrooms>\d+)\s*Slaapkamers)?",
     re.I,
 )
@@ -55,38 +55,50 @@ class ImmovlanScraper(BaseScraper):
     MAX_PAGES = 5
 
     def scrape(self) -> list[Listing]:
-        """Scrape Immovlan: search pages → IDs → detail pages → city-filtered listings."""
-        all_ids: list[str] = []
+        """Scrape Immovlan: search pages → detail URLs → detail pages → city-filtered listings."""
+        all_detail_urls: list[str] = []
         seen_ids: set[str] = set()
 
         for page in range(1, self.MAX_PAGES + 1):
-            page_ids = self._fetch_search_page(page)
-            if not page_ids:
+            page_urls = self._fetch_search_page(page)
+            if not page_urls:
                 break
 
-            # Short IDs (start with letter) = individual properties
-            short_ids = [pid for pid in page_ids if re.match(r"^[A-Z]", pid)]
-            new_ids = [pid for pid in short_ids if pid not in seen_ids]
-            if not new_ids:
+            # Filter: type "huis" only (not villa/appartement/handelspand)
+            house_urls = [u for u in page_urls if "/detail/huis/" in u]
+
+            new_urls = []
+            for u in house_urls:
+                uid = u.rstrip("/").split("/")[-1]
+                if uid not in seen_ids:
+                    seen_ids.add(uid)
+                    new_urls.append(u)
+
+            if not house_urls:
+                # No house listings on this page — might be last page
+                if len(page_urls) < 2:
+                    break
+                continue
+
+            if not new_urls:
                 break
 
-            all_ids.extend(new_ids)
-            seen_ids.update(new_ids)
+            all_detail_urls.extend(new_urls)
 
-            if len(page_ids) < 20:
+            if len(page_urls) < 2:
                 break
 
             logger.info(
-                f"[{self.PLATFORM_NAME}] Page {page}: {len(new_ids)} new IDs"
+                f"[{self.PLATFORM_NAME}] Page {page}: {len(new_urls)} new listings"
             )
 
         # Fetch detail pages
         logger.info(
-            f"[{self.PLATFORM_NAME}] Fetching {len(all_ids)} detail pages..."
+            f"[{self.PLATFORM_NAME}] Fetching {len(all_detail_urls)} detail pages..."
         )
         listings: list[Listing] = []
-        for prop_id in all_ids:
-            listing = self._fetch_detail(prop_id)
+        for detail_url in all_detail_urls:
+            listing = self._fetch_detail(detail_url)
             if listing:
                 listings.append(listing)
 
@@ -104,41 +116,38 @@ class ImmovlanScraper(BaseScraper):
         return listings
 
     def _fetch_search_page(self, page: int) -> list[str]:
-        """Fetch search result page and extract property IDs."""
+        """Fetch search result page and extract full detail URLs from anchor links."""
         url = (
             f"https://www.immovlan.be/nl/vastgoed"
             f"?type=huis&transactiontypes=te-koop&places=all"
             f"&pricemin={MIN_PRICE}&pricemax={MAX_PRICE}"
             f"&page={page}"
         )
-
         response = self._get_with_fallback(url)
         if not response:
             return []
 
-        match = re.search(
-            r"STORAGE_KEY_SEARCH_RESULTS.*?JSON\.stringify\((\[.*?\])\)",
-            response.text,
-            re.DOTALL,
-        )
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except (json.JSONDecodeError, TypeError):
-                return []
+        soup = BeautifulSoup(response.text, "html.parser")
+        seen: set[str] = set()
+        urls = []
+        for a_tag in soup.find_all("a", href=re.compile(r"/detail/")):
+            href = a_tag.get("href", "").strip()
+            if not href:
+                continue
+            # Normalise absolute URL
+            if href.startswith("/"):
+                href = "https://www.immovlan.be" + href
+            if href not in seen:
+                seen.add(href)
+                urls.append(href)
 
-        return []
+        return urls
 
-    def _fetch_detail(self, prop_id: str) -> Listing | None:
-        """Fetch and parse a single property detail page."""
-        url = f"https://www.immovlan.be/nl/detail/{prop_id}"
+    def _fetch_detail(self, detail_url: str) -> Listing | None:
+        """Fetch and parse a single property detail page using the full URL."""
+        prop_id = detail_url.rstrip("/").split("/")[-1]
 
-        try:
-            response = self._rate_limited_get(url, allow_redirects=True, timeout=20)
-        except Exception as exc:
-            logger.debug(f"[{self.PLATFORM_NAME}] Failed {prop_id}: {exc}")
-            return None
-
+        response = self._get_with_fallback(detail_url, timeout=20)
         if not response or not response.text:
             return None
 
@@ -148,10 +157,6 @@ class ImmovlanScraper(BaseScraper):
         self, html: str, prop_id: str, final_url: str
     ) -> Listing | None:
         """Parse detail page. Relies primarily on meta description tag + JSON-LD."""
-        # Appartement check on raw HTML before any method
-        if "appartement" in html.lower():
-            return None
-
         # --- Method 1: Parse the meta description tag (most structured) ---
         raw_meta = _RAW_META_RE.search(html)
         if raw_meta:
@@ -223,7 +228,7 @@ class ImmovlanScraper(BaseScraper):
             price=price,
             bedrooms=bedrooms,
             address=address,
-            url=f"https://www.immovlan.be/nl/detail/{prop_id}",
+            url=f"https://www.immovlan.be/nl/detail/huis/te-koop/{prop_id}",
             description=meta_content,
             image_urls=[],
             surface_m2=surface,
@@ -321,7 +326,7 @@ class ImmovlanScraper(BaseScraper):
             price=price,
             bedrooms=bedrooms,
             address=address,
-            url=f"https://www.immovlan.be/nl/detail/{prop_id}",
+            url=f"https://www.immovlan.be/nl/detail/huis/te-koop/{prop_id}",
             description=desc.strip(),
             image_urls=[],
             surface_m2=living_surface,
@@ -368,7 +373,7 @@ class ImmovlanScraper(BaseScraper):
             price=price,
             bedrooms=bedrooms,
             address=self._extract_address(html),
-            url=f"https://www.immovlan.be/nl/detail/{prop_id}",
+            url=f"https://www.immovlan.be/nl/detail/huis/te-koop/{prop_id}",
             description=description,
             image_urls=[],
             surface_m2=surface,

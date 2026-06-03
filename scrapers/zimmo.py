@@ -168,55 +168,114 @@ class ZimmoScraper(BaseScraper):
         return listings
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        if listing.description and len(listing.description) >= 80 and len(listing.image_urls) > 1:
+        """Enrich listing with detail-page data: description, EPC, surface, lot, bedrooms, images."""
+        # Early return if already fully enriched
+        if (
+            listing.description
+            and len(listing.description) >= 80
+            and len(listing.image_urls) > 1
+            and listing.epc_label
+            and listing.surface_m2
+            and listing.bedrooms
+        ):
             return listing
         try:
             response = self._rate_limited_get(listing.url)
             soup = BeautifulSoup(response.text, "lxml")
-            if not listing.description:
-                for sel in ['meta[property="og:description"]', 'meta[name="description"]',
-                            '[class*="description"]', '[data-testid*="description"]']:
-                    node = soup.select_one(sel)
-                    if not node:
-                        continue
-                    text = node.get("content", "").strip() if node.name == "meta" else node.get_text(" ", strip=True)
-                    if len(text) >= 40:
-                        listing.description = text
-                        break
-            if len(listing.image_urls) <= 1:
-                images = soup.select('img[src*="zimmo"], img[data-src*="zimmo"], img[src]')
-                urls = []
-                for img in images:
-                    u = img.get("src") or img.get("data-src") or ""
-                    if not u:
-                        continue
-                    if u.startswith("//"):
-                        u = f"https:{u}"
-                    elif not u.startswith("http"):
-                        u = f"https://www.zimmo.be{u}"
-                    if u not in urls:
-                        urls.append(u)
-                    if len(urls) >= 5:
-                        break
-                if urls:
-                    listing.image_urls = urls
 
-            # Enrich EPC label, surface, and lot surface from detail page
-            if not listing.epc_label:
-                epc_el = soup.select_one("[class*='epc'], [class*='energie'], [class*='energielabel'], "
-                                         "[class*='peb'], [data-testid*='epc']")
-                if epc_el:
-                    listing.epc_label = epc_el.get_text(strip=True) or None
+            # --- 1. Beschrijving ---
+            if not listing.description or len(listing.description) < 80:
+                # Prefer long description blocks over tab labels
+                for sel in ['.section-description', '.description-block',
+                            '[class*="description"]:not(.tabmenu-description)']:
+                    desc_el = soup.select_one(sel)
+                    if desc_el:
+                        text = desc_el.get_text(strip=True)
+                        if len(text) >= 40:
+                            listing.description = text
+                            break
 
+            # --- 2. Woonoppervlakte ---
             if not listing.surface_m2:
-                surface = self._extract_surface(soup)
-                if surface:
-                    listing.surface_m2 = surface
+                for text_node in soup.find_all(string=re.compile(r'Woonopp\.?\s*')):
+                    parent = text_node.parent
+                    row = parent.parent if parent else None
+                    if row:
+                        m = re.search(r'(\d+)\s*m', row.get_text(strip=True))
+                        if m:
+                            listing.surface_m2 = int(m.group(1))
+                            break
 
+            # --- 3. Perceeloppervlakte ---
             if not listing.lot_surface_m2:
-                lot = self._extract_lot_surface(soup)
-                if lot:
-                    listing.lot_surface_m2 = lot
+                for text_node in soup.find_all(string=re.compile(r'Grondopp\.?\s*')):
+                    parent = text_node.parent
+                    row = parent.parent if parent else None
+                    if row:
+                        m = re.search(r'(\d+)\s*m', row.get_text(strip=True))
+                        if m:
+                            listing.lot_surface_m2 = int(m.group(1))
+                            break
+
+            # --- 4. EPC-waarde ---
+            if not listing.epc_label:
+                # EPC letter zit in image filename: /public/images/energielabels/epc_a.png
+                epc_img = soup.select_one(".energie-label img, img.energie-label, [class*='energie-label'] img")
+                if not epc_img:
+                    epc_img = soup.select_one("img[src*='energielabels']")
+                if epc_img:
+                    src = epc_img.get("src") or ""
+                    epc_match = re.search(r'epc_([a-f][+-]?)\.', src, re.IGNORECASE)
+                    if epc_match:
+                        listing.epc_label = epc_match.group(1).upper()
+                if not listing.epc_label:
+                    # Fallback: text-based search
+                    for text_node in soup.find_all(string=re.compile(r'EPC-waarde')):
+                        parent = text_node.parent
+                        row = parent.parent if parent else None
+                        if row:
+                            txt = row.get_text(strip=True)
+                            epc_match = re.search(r'([A-F][+-]?)', txt)
+                            if epc_match:
+                                listing.epc_label = epc_match.group(1).upper()
+                                break
+
+            # --- 5. Slaapkamers ---
+            if not listing.bedrooms:
+                for text_node in soup.find_all(string=re.compile(r'Slaapkamers?\s*$')):
+                    parent = text_node.parent
+                    row = parent.parent if parent else None
+                    if row:
+                        txt = row.get_text(strip=True)
+                        m = re.search(r'(\d+)', txt)
+                        if m:
+                            listing.bedrooms = int(m.group(1))
+                            break
+                if not listing.bedrooms:
+                    for el in soup.find_all(string=re.compile(r'Aantal slaapkamers')):
+                        p = el.parent.parent if el.parent else None
+                        if p:
+                            m = re.search(r'(\d+)', p.get_text(strip=True))
+                            if m:
+                                listing.bedrooms = int(m.group(1))
+                                break
+
+            # --- 6. Extra afbeeldingen ---
+            if len(listing.image_urls) <= 1:
+                gallery_imgs = soup.select(
+                    "[class*='gallery'] img, [class*='photo'] img, "
+                    "[class*='slider'] img[src*='files.zimmo'], "
+                    "[class*='slider'] img[data-src*='files.zimmo']"
+                )
+                new_urls = []
+                seen = set(listing.image_urls)
+                for img in gallery_imgs:
+                    src = img.get("src") or img.get("data-src") or ""
+                    if src and "files.zimmo" in src and src not in seen:
+                        new_urls.append(src)
+                        seen.add(src)
+                if new_urls:
+                    listing.image_urls = (listing.image_urls or []) + new_urls[:5]
 
         except Exception as exc:
             logger.debug(f"[{self.PLATFORM_NAME}] enrich failed {listing.id}: {exc}")

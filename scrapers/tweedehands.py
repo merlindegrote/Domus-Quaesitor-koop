@@ -199,8 +199,130 @@ class TweeDeHandsScraper(BaseScraper):
         )
 
     def enrich_listing(self, listing: Listing) -> Listing:
-        """2dehands already provides all data in the search page JSON."""
+        """Fetch detail page and try to extract EPC, surface, lot surface.
+
+        2dehands provides minimal structured data on detail pages.
+        EPC is rarely available — usually null in JSON-LD.
+        Surface/lot may appear in free-text description only.
+        """
+        if not listing.url:
+            return listing
+
+        response = self._get_with_fallback(listing.url)
+        if not response:
+            return listing
+
+        html = response.text
+
+        # --- Try JSON-LD for EPC ---
+        for m in re.finditer(
+            r'<script type="application/ld\+json">(.*?)</script>',
+            html, re.DOTALL
+        ):
+            try:
+                ld = json.loads(m.group(1))
+                if isinstance(ld, dict):
+                    epc = ld.get("hasEnergyEfficiencyCategory")
+                    if epc and isinstance(epc, str) and epc.strip():
+                        listing.epc_label = epc.strip()
+                        break
+            except json.JSONDecodeError:
+                continue
+
+        # --- Try structured data from __CONFIG__ for attributes ---
+        idx = html.find("window.__CONFIG__ = ")
+        if idx >= 0:
+            try:
+                start = html.index("{", idx)
+                depth = 1
+                end = start + 1
+                while depth > 0 and end < len(html):
+                    ch = html[end]
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                    end += 1
+                config = json.loads(html[start:end])
+                listing_data = config.get("listing", {})
+                # __CONFIG__ usually has no surface/epc in listing data
+                # but check customDimensions for anything useful
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # --- Try from description text for surface / lot surface ---
+        # Description is already on the listing from search page
+        desc = listing.description or ""
+        if not listing.surface_m2:
+            surface = self._extract_surface_from_text(desc)
+            if surface:
+                listing.surface_m2 = surface
+
+        if not listing.lot_surface_m2:
+            lot = self._extract_lot_surface_from_text(desc)
+            if lot:
+                listing.lot_surface_m2 = lot
+
         return listing
+
+    @staticmethod
+    def _extract_surface_from_text(text: str) -> int | None:
+        """Try to extract living surface m² from Dutch description text.
+
+        Patterns:
+          - "woonoppervlakte X m²"
+          - "oppervlakte X m²"
+          - "bewoonbare oppervlakte X m²"
+          - "X m² woonoppervlak"
+          - "ongeveer X m²"
+          - "X m²" (near words like kamer, appartement, woning)
+        """
+        patterns = [
+            r"woonoppervlak(?:te)?\s*(?:is|van|:)?\s*(\d{2,4})\s*m[²2]",
+            r"bewoonbare\s+oppervlakte\s*(?:is|van|:)?\s*(\d{2,4})\s*m[²2]",
+            r"oppervlakte\s*(?:is|van|:)?\s*(\d{2,4})\s*m[²2]",
+            r"(\d{2,4})\s*m[²2]\s*(?:woonoppervlak|woonoppervlakte)",
+            r"ongeveer\s*(\d{2,4})\s*m[²2]",
+            r"totale\s+oppervlakte\s*(?:is|van|:)?\s*(\d{2,4})\s*m[²2]",
+        ]
+        text_lower = text.lower()
+        for pat in patterns:
+            m = re.search(pat, text_lower)
+            if m:
+                val = int(m.group(1))
+                # Sanity: surface between 10 and 2000 m²
+                if 10 <= val <= 2000:
+                    return val
+        return None
+
+    @staticmethod
+    def _extract_lot_surface_from_text(text: str) -> int | None:
+        """Try to extract lot/plot surface m² from Dutch description text.
+
+        Patterns:
+          - "perceel X m²"
+          - "grond X m²"
+          - "kavel X m²"
+          - "X m² grond"
+          - "X m² perceel"
+          - "tuin X m²"
+        """
+        patterns = [
+            r"perceel(?:soppervlakte)?\s*(?:is|van|:)?\s*(\d{2,5})\s*m[²2]",
+            r"grond(?:oppervlakte)?\s*(?:is|van|:)?\s*(\d{2,5})\s*m[²2]",
+            r"kavel(?:oppervlakte)?\s*(?:is|van|:)?\s*(\d{2,5})\s*m[²2]",
+            r"(\d{2,5})\s*m[²2]\s*(?:grond|perceel|kavel|terrein)",
+            r"tuin\s*(?:is|van|:)?\s*(\d{2,5})\s*m[²2]",
+        ]
+        text_lower = text.lower()
+        for pat in patterns:
+            m = re.search(pat, text_lower)
+            if m:
+                val = int(m.group(1))
+                # Sanity: lot surface between 10 and 50000 m²
+                if 10 <= val <= 50000:
+                    return val
+        return None
 
 
 # Standalone test

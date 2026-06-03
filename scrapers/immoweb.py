@@ -445,60 +445,61 @@ class ImmowebScraper(BaseScraper):
         try:
             response = self._rate_limited_get(listing.url)
 
-            classified_match = re.search(
-                r'window\.classified\s*=\s*(\{.*\})\s*;\s*',
-                response.text,
-                re.DOTALL,
-            )
-            if classified_match:
-                try:
-                    data = json.loads(classified_match.group(1))
-                    if not listing.description:
-                        desc = data.get("property", {}).get("description", {})
-                        if isinstance(desc, dict):
-                            listing.description = desc.get("nl", "") or desc.get("fr", "") or ""
-                        elif isinstance(desc, str):
-                            listing.description = desc
-                    if len(listing.image_urls) <= 1:
-                        media = data.get("media", {}).get("pictures", [])
-                        listing.image_urls = [
-                            p.get("url", "") for p in media[:5] if isinstance(p, dict) and p.get("url")
-                        ]
-                    if not listing.epc_label:
-                        listing.epc_label = self._extract_epc_from_json(data)
-                    if not listing.surface_m2:
-                        listing.surface_m2 = self._extract_surface_from_json(data)
-                    if not listing.lot_surface_m2:
-                        listing.lot_surface_m2 = self._extract_lot_surface_from_json(data)
+            # Use raw_decode to parse only the first JSON object, not everything until last } on page
+            idx = response.text.find("window.classified")
+            if idx >= 0:
+                start = response.text.find("{", idx)
+                if start >= 0:
+                    try:
+                        decoder = json.JSONDecoder()
+                        data, end = decoder.raw_decode(response.text, start)
+                    except json.JSONDecodeError:
+                        pass
+                    else:
+                        if not listing.description:
+                            desc = data.get("property", {}).get("description", {})
+                            if isinstance(desc, dict):
+                                listing.description = desc.get("nl", "") or desc.get("fr", "") or ""
+                            elif isinstance(desc, str):
+                                listing.description = desc
+                        if len(listing.image_urls) <= 1:
+                            media = data.get("media", {}).get("pictures", [])
+                            listing.image_urls = [
+                                p.get("url", "") for p in media[:5] if isinstance(p, dict) and p.get("url")
+                            ]
+                        if not listing.epc_label:
+                            listing.epc_label = self._extract_epc_from_json(data)
+                        if not listing.surface_m2:
+                            listing.surface_m2 = self._extract_surface_from_json(data)
+                        if not listing.lot_surface_m2:
+                            listing.lot_surface_m2 = self._extract_lot_surface_from_json(data)
 
-                    # Status detectie
-                    if not listing.status:
-                        flags = data.get("flags", {}) if isinstance(data.get("flags"), dict) else {}
-                        flag_main = flags.get("main", "")
-                        if flag_main == "under_option":
-                            listing.status = "under_option"
-                        elif flag_main == "life_annuity":
-                            listing.status = "life_annuity"
+                        # Status detectie
+                        if not listing.status:
+                            flags = data.get("flags", {}) if isinstance(data.get("flags"), dict) else {}
+                            flag_main = flags.get("main", "")
+                            if flag_main == "under_option":
+                                listing.status = "under_option"
+                            elif flag_main == "life_annuity":
+                                listing.status = "life_annuity"
 
-                        # Lijfrente check in beschrijving
-                        desc = listing.description or ""
-                        if "lijfrente" in desc.lower() or "levenslang" in desc.lower():
-                            listing.status = "life_annuity"
+                            # Lijfrente check in beschrijving
+                            desc = listing.description or ""
+                            if "lijfrente" in desc.lower() or "levenslang" in desc.lower():
+                                listing.status = "life_annuity"
 
-                    # Titel met straat+nummer (detail page heeft betere data)
-                    prop = data.get("property", {})
-                    if isinstance(prop, dict):
-                        loc = prop.get("location", {})
-                        if isinstance(loc, dict):
-                            street = loc.get("street", "")
-                            number = loc.get("number", "")
-                            locality = loc.get("locality", "")
-                            if street and number:
-                                listing.title = f"{street} {number} — {locality}"
+                        # Titel met straat+nummer (detail page heeft betere data)
+                        prop = data.get("property", {})
+                        if isinstance(prop, dict):
+                            loc = prop.get("location", {})
+                            if isinstance(loc, dict):
+                                street = loc.get("street", "")
+                                number = loc.get("number", "")
+                                locality = loc.get("locality", "")
+                                if street and number:
+                                    listing.title = f"{street} {number} — {locality}"
 
-                    return listing
-                except json.JSONDecodeError:
-                    pass
+                        return listing
 
             # Fallback HTML parse
             soup = BeautifulSoup(response.text, "lxml")
