@@ -67,6 +67,9 @@ class ImmovlanScraper(BaseScraper):
             # Filter: type "huis" only (not villa/appartement/handelspand)
             house_urls = [u for u in page_urls if "/detail/huis/" in u]
 
+            # Filter by accepted cities BEFORE fetching detail pages (city is in URL)
+            house_urls = [u for u in house_urls if self._is_in_accepted_cities(u)]
+
             new_urls = []
             for u in house_urls:
                 uid = u.rstrip("/").split("/")[-1]
@@ -114,6 +117,25 @@ class ImmovlanScraper(BaseScraper):
         )
 
         return listings
+
+    def _is_in_accepted_cities(self, url: str) -> bool:
+        """Check if URL's postcode is in our target postals WITHOUT fetching detail page.
+        URL format: https://immovlan.be/nl/detail/huis/te-koop/{postcode}/{city}/{id}"""
+        from config import TARGET_POSTALS, EXCLUDE_CITIES_FINAL
+        # Postcode is at position -3 in the URL path
+        parts = url.rstrip("/").split("/")
+        try:
+            postal = parts[-3]
+        except IndexError:
+            return False
+        if postal in TARGET_POSTALS:
+            # Check if the city (parts[-2]) is in the exclude list
+            city_part = parts[-2].lower() if len(parts) >= 2 else ""
+            for ex_city in EXCLUDE_CITIES_FINAL:
+                if ex_city.lower() == city_part:
+                    return False
+            return True
+        return False
 
     def _fetch_search_page(self, page: int) -> list[str]:
         """Fetch search result page and extract full detail URLs from anchor links."""

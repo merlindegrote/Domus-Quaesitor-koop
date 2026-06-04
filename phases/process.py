@@ -24,6 +24,8 @@ from datetime import datetime
 from glob import glob
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from dotenv import load_dotenv
 
 from location_filter import needs_renovation, filter_listings_by_location
@@ -70,11 +72,12 @@ def load_batches() -> list[Listing]:
         try:
             with open(fpath, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if not isinstance(data, list):
-                logger.warning("Skipping %s: not a list", fpath)
+            payload = data if isinstance(data, list) else data.get("listings", [])
+            if not isinstance(payload, list):
+                logger.warning("Skipping %s: no listing array found", fpath)
                 continue
-            count = len(data)
-            for item in data:
+            count = len(payload)
+            for item in payload:
                 if not isinstance(item, dict):
                     continue
                 listing = Listing(

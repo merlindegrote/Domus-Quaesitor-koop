@@ -27,7 +27,7 @@ class ZimmoScraper(BaseScraper):
     PLATFORM_NAME = "zimmo"
     REQUEST_DELAY = 2.0
 
-    MAX_PAGES = 3
+    MAX_PAGES = 1
 
     def __init__(self):
         super().__init__()
@@ -71,10 +71,17 @@ class ZimmoScraper(BaseScraper):
         return listings
 
     def _scrape_search_page(self, url: str) -> list[Listing]:
-        """Parse a single Zimmo search results page."""
+        """Parse a single Zimmo search results page.
+        Priority: 1) embedded JSON from app.start block  2) JSON-LD  3) HTML parsing
+        """
         response = self._get_with_fallback(url)
         if not response:
             return []
+
+        # Embedded JSON is fastest — try first
+        json_listings = self._extract_embedded_json(response.text)
+        if json_listings:
+            return json_listings
 
         soup = BeautifulSoup(response.text, "lxml")
 
@@ -82,23 +89,23 @@ class ZimmoScraper(BaseScraper):
         if json_listings:
             return json_listings
 
-        json_listings = self._extract_embedded_json(response.text)
-        if json_listings:
-            return json_listings
-
-        listings = []
-        cards = soup.select(
-            ".property-item, [class*='property-card'], "
-            "[class*='search-result'], article[class*='result'], .card-property"
-        )
-        for card in cards:
-            listing = self._parse_html_card(card, soup)
-            if listing:
-                listings.append(listing)
-
-        if listings:
-            return listings
-        return self._parse_anchor_blocks(soup)
+        # HTML fallback — only for pages with fewer than 300KB
+        if len(response.text) < 300_000:
+            cards = soup.select(
+                ".property-item, [class*='property-card'], "
+                "[class*='search-result'], article[class*='result'], .card-property"
+            )
+            if cards:
+                listings = []
+                for card in cards:
+                    listing = self._parse_html_card(card, soup)
+                    if listing:
+                        listings.append(listing)
+                if listings:
+                    return listings
+            return self._parse_anchor_blocks(soup)
+        
+        return []
 
     def _page_url(self, page: int) -> str:
         """Legacy wrapper — delegates to _search_url."""
@@ -296,20 +303,93 @@ class ZimmoScraper(BaseScraper):
         return listings
 
     def _extract_embedded_json(self, html: str) -> list[Listing]:
-        for pattern in [r'var\s+properties\s*=\s*(\[.*?\]);',
-                        r'"properties"\s*:\s*(\[.*?\])',
-                        r'searchResults\s*[=:]\s*(\[.*?\])']:
-            match = re.search(pattern, html, re.DOTALL)
-            if match:
-                try:
-                    data = json.loads(match.group(1))
-                    results = [self._parse_json_item(item) for item in data]
-                    results = [r for r in results if r]
-                    if results:
-                        return results
-                except (json.JSONDecodeError, TypeError):
-                    continue
-        return []
+        """Extract properties array from app.start({properties: [...]}) JS block."""
+        # Find app.start block via brace counting
+        start = html.find('app.start({')
+        if start < 0:
+            return []
+            
+        depth = 0
+        in_str = False
+        escaped = False
+        for i in range(start, len(html)):
+            c = html[i]
+            if escaped:
+                escaped = False
+                continue
+            if c == '\\' and in_str:
+                escaped = True
+                continue
+            if c == '"' and not escaped:
+                in_str = not in_str
+                continue
+            if not in_str:
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        block = html[start:i+1]
+                        break
+        else:
+            return []
+        
+        # Find properties: [...] in the block - match the array by tracking brackets
+        props_start = block.find('properties:')
+        if props_start < 0:
+            return []
+            
+        arr_start = block.find('[', props_start)
+        if arr_start < 0:
+            return []
+            
+        # Count brackets to find matching close
+        arr_depth = 0
+        in_str = False
+        escaped = False
+        for i in range(arr_start, len(block)):
+            c = block[i]
+            if escaped:
+                escaped = False
+                continue
+            if c == '\\' and in_str:
+                escaped = True
+                continue
+            if c == '"' and not escaped:
+                in_str = not in_str
+                continue
+            if not in_str:
+                if c == '[':
+                    arr_depth += 1
+                elif c == ']':
+                    arr_depth -= 1
+                    if arr_depth == 0:
+                        raw_array = block[arr_start:i+1]
+                        break
+        else:
+            return []
+        
+        # Clean JS -> JSON: fix backslash escaping
+        clean = raw_array.replace('\\\\/', '/')
+        clean = clean.replace('\\\\"', '"')
+        clean = clean.replace("\\'", "'")
+        
+        # Remove trailing commas
+        clean = re.sub(r',\s*]', ']', clean)
+        
+        try:
+            data = json.loads(clean)
+        except json.JSONDecodeError:
+            # Try more aggressive: convert unquoted JS keys
+            # Replace unquoted word keys with quoted ones
+            try:
+                clean2 = re.sub(r'(?<=[{,])\s*(\w+):', r'"\1":', clean)
+                data = json.loads(clean2)
+            except json.JSONDecodeError:
+                return []
+        
+        results = [self._parse_json_item(item) for item in data]
+        return [r for r in results if r]
 
     def _parse_jsonld_item(self, item: dict) -> Listing | None:
         city = self._current_city
@@ -355,46 +435,90 @@ class ZimmoScraper(BaseScraper):
             return None
 
     def _parse_json_item(self, item: dict) -> Listing | None:
-        city = self._current_city
+        """Parse flat property object from Zimmo's app.start properties array.
+        Field names: code, type, prijs, address, gemeente, postcode, slaapkamers,
+        b_woonopp, hoofdFoto, nieuwbouw, status
+        """
         try:
-            # Skip appartments
-            if item.get("type") != "house":
+            # Skip non-house types
+            if item.get("type", "").lower() not in ("huis", "house", ""):
                 return None
-            title_val = item.get("title", item.get("name", ""))
-            if "appartement" in title_val.lower():
+            
+            # Skip if status indicates rental
+            status = item.get("status", "")
+            if "huur" in status.lower() or "rent" in status.lower():
                 return None
 
-            listing_id = str(item.get("id", ""))
+            listing_id = str(item.get("code", item.get("id", "")))
             if not listing_id:
                 return None
-            price = int(item.get("price", item.get("rent", 0)))
-            if not (MIN_PRICE <= price <= MAX_PRICE):
+
+            # Price: string, number, or nested {vraagPrijs: X}
+            rp = item.get("prijs", 0); raw_price = rp.get("vraagPrijs", 0) if isinstance(rp, dict) else rp
+            if isinstance(raw_price, str):
+                raw_price = raw_price.replace(".", "").replace(",", "")
+            try:
+                price = int(float(raw_price))
+            except (ValueError, TypeError):
+                price = 0
+            if price == 0 or price < MIN_PRICE or price > MAX_PRICE:
                 return None
-            bedrooms = int(item.get("rooms", item.get("bedrooms", item.get("bedroom_count", 0))))
+
+            # Bedrooms
+            raw_beds = item.get("slaapkamers", MIN_BEDROOMS)
+            if isinstance(raw_beds, str):
+                try:
+                    bedrooms = int(raw_beds)
+                except ValueError:
+                    bedrooms = MIN_BEDROOMS
+            else:
+                bedrooms = int(raw_beds) if raw_beds else MIN_BEDROOMS
             if bedrooms < MIN_BEDROOMS:
                 bedrooms = MIN_BEDROOMS
-            url = item.get("url", item.get("link", ""))
-            if url and not url.startswith("http"):
-                url = f"https://www.zimmo.be{url}"
+
+            # Address - handle nested adres object
+            ao = item.get("adres") or {}
+            street = item.get("address", "") or item.get("straat", "") or ao.get("straat", "")
+            number = item.get("huisnummer", "") or ao.get("huisnummer", "") or ""
+            city = item.get("gemeente", "") or ao.get("gemeente", "") or self._current_city
+            postal = item.get("postcode", "") or ao.get("postcode", "") or self._current_postal
+            
+            if street and number:
+                full_address = f"{street} {number}, {postal} {city}"
+            elif street:
+                full_address = f"{street}, {postal} {city}"
+            else:
+                full_address = f"{postal} {city}"
+
+            # URL
+            url = f"https://www.zimmo.be/nl/{city.lower()}-{postal}/huis/{listing_id}"
+
+            # Images
             images = []
-            if "image" in item:
-                img = item["image"]
-                images = [img] if isinstance(img, str) else img if isinstance(img, list) else []
-            elif "images" in item and isinstance(item["images"], list):
-                images = item["images"][:5]
+            m = item.get("hoofdFoto", "") or item.get("image", ""); main_photo = m.get("url", "") if isinstance(m, dict) else m
+            if main_photo:
+                images.append(main_photo)
+
+            # Surface
+            raw_surface = item.get("b_woonopp", item.get("woonopp", ""))
+            surface = None
+            if raw_surface:
+                try:
+                    surface = int(float(raw_surface))
+                except (ValueError, TypeError):
+                    pass
+
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
-                title=f"Te koop: {item.get('address', item.get('location', city.capitalize()))}",
+                title=f"Te koop: {street} {number} — {city}".strip(),
                 price=price,
                 bedrooms=bedrooms,
-                address=item.get("address", item.get("location", city.capitalize())),
+                address=full_address,
                 url=url,
-                description=item.get("description", ""),
+                description="",
                 image_urls=images,
-                epc_label=item.get("epc", item.get("epc_label")),
-                surface_m2=self._safe_int(item.get("surface", item.get("area"))),
-                lot_surface_m2=self._safe_int(item.get("lot_surface", item.get("land_area", item.get("plot_area")))),
+                surface_m2=surface,
             )
         except Exception as e:
             logger.debug(f"[{self.PLATFORM_NAME}] parse json failed: {e}")

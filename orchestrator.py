@@ -122,7 +122,7 @@ def phase2_immovlan():
 def phase3_process():
     """Fase 3: merge, dedup, score, email"""
     log("FASE 3: Process — merge + dedup + score + email")
-    ok, out = run_script("phases/process_all.py", timeout=300)
+    ok, out = run_script("phases/process_all.py", timeout=900)
     
     if ok:
         # Toon laatste paar regels
