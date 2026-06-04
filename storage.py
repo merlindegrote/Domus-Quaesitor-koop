@@ -106,27 +106,19 @@ def _normalize_address(address: str) -> str:
 
 
 def listing_fingerprint(listing: Listing) -> str:
-    """Cross-platform fingerprint — matched op straatnaam + prijs + kamers + oppervlakte."""
+    """Cross-platform fingerprint — matched op straatnaam + prijs (zonder kamers/opp — die variëren per platform)."""
     street = _extract_street_name(listing.address)
-    return "|".join(
-        [
-            street[:40],
-            str(listing.price or 0),
-            str(listing.bedrooms or 0),
-            str(listing.surface_m2 or 0),
-        ]
-    )
+    return f"{street[:40]}|{listing.price or 0}"
 
 
 def listing_full_fingerprint(listing: Listing) -> str:
-    """Fingerprint op volledig adres (met huisnummer) ipv enkel straatnaam."""
+    """Fingerprint op volledig adres + prijs (zonder kamers/opp — die variëren per platform)."""
     addr = (listing.address or "").strip().lower()
-    # Verwijder postcode+stad voor de pure straat+nummer
+    # Verwijder postcode+stad voor de pure straat+nummer; cleanup trailing punctuation
     addr_clean = re.sub(r'\s+\d{4}\s+[a-z\s-]+$', '', addr).strip()
+    addr_clean = addr_clean.rstrip(',;.').strip()
     price = listing.price or 0
-    beds = max(listing.bedrooms or 0, 1)
-    surf = listing.surface_m2 or 0
-    return f"{addr_clean}|{price}|{beds}|{surf}"
+    return f"{addr_clean}|{price}"
 
 
 def build_sent_index(history: dict, legacy_seen_ids: set[str]) -> tuple[set[str], set[str]]:

@@ -22,7 +22,28 @@ logger = logging.getLogger(__name__)
 SEARCH_URL = "https://www.2dehands.be/l/immo/q/{city}/"
 
 # Category 1041 = houses_and_rooms (immobilien/huizen)
-HOUSES_CATEGORY = 1041
+HOUSES_CATEGORY = 2142
+
+# Title patterns to filter out (gezocht, makelaar services, Costa Blanca, etc.)
+EXCLUDE_TITLE_PATTERNS = [
+    r"gezocht",
+    r"zonder makelaar",
+    r"verkopen",
+    r"direct verkopen",
+    r"op zoek",
+    r"costa blanca",
+    r"alicante",
+    r"spanje",
+    r"discreet",
+    r"erfenis",
+    r"scheiding",
+    r"opbrengsteigendom",
+    r"handelspand",
+    r"schilders?",
+    r"kapsalon",
+    r"postduif",
+    r"betaalbare",
+]
 
 
 class TweeDeHandsScraper(BaseScraper):
@@ -97,11 +118,6 @@ class TweeDeHandsScraper(BaseScraper):
         if category_id != HOUSES_CATEGORY:
             return None
 
-        # Property type — category 1041 includes apartments; skip non-houses
-        pt = raw.get("categorySpecificAttributes", {}).get("propertyType", "")
-        if pt and pt != "HOUSE":
-            return None
-
         # Location
         location = raw.get("location", {})
         city_name = location.get("cityName", "")
@@ -116,11 +132,19 @@ class TweeDeHandsScraper(BaseScraper):
         if not any(c.lower() == city_name.lower() for c in ACCEPT_CITIES):
             return None
 
+        # Title filter — remove non-relevant listings (gezocht, makelaar diensten, etc.)
+        title = raw.get("title", "")
+        title_lower = title.lower()
+        import re as re_mod
+        for pat in EXCLUDE_TITLE_PATTERNS:
+            if re_mod.search(pat, title_lower):
+                return None
+
         # Price
         price_info = raw.get("priceInfo", {})
         price_cents = price_info.get("priceCents", 0)
         price_type = price_info.get("priceType", "")
-        if price_type == "NOTK" or price_type == "SEE_DESCRIPTION":
+        if price_type in ("NOTK", "SEE_DESCRIPTION"):
             return None
         price = price_cents // 100
         if price < MIN_PRICE or price > MAX_PRICE:

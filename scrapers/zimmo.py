@@ -493,11 +493,13 @@ class ZimmoScraper(BaseScraper):
             # URL
             url = f"https://www.zimmo.be/nl/{city.lower()}-{postal}/huis/{listing_id}"
 
-            # Images
-            images = []
-            m = item.get("hoofdFoto", "") or item.get("image", ""); main_photo = m.get("url", "") if isinstance(m, dict) else m
-            if main_photo:
-                images.append(main_photo)
+            # Images — firstImages has 5 photos, hoofdFoto has 1
+            images = item.get("firstImages", []) or []
+            if not images:
+                m = item.get("hoofdFoto", "") or item.get("image", "")
+                main_photo = m.get("url", "") if isinstance(m, dict) else m
+                if main_photo:
+                    images.append(main_photo)
 
             # Surface
             raw_surface = item.get("b_woonopp", item.get("woonopp", ""))
@@ -508,12 +510,17 @@ class ZimmoScraper(BaseScraper):
                 except (ValueError, TypeError):
                     pass
 
+            # EPC label — zit in search JSON, niet enkel op detailpagina
+            raw_epc = item.get("energyLabel", "") or item.get("epc", "")
+            epc_label = raw_epc.upper() if raw_epc else None
+
             return Listing(
                 id=listing_id,
                 platform=self.PLATFORM_NAME,
                 title=f"Te koop: {street} {number} — {city}".strip(),
                 price=price,
                 bedrooms=bedrooms,
+                epc_label=epc_label,
                 address=full_address,
                 url=url,
                 description="",

@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Merge alle batch outputs in /tmp/domus-batches/, dedup, score, output processed JSON"""
-import sys, os, json, glob, time, signal
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Callable, Any
+import sys, os, json, glob, time, gc
 from pathlib import Path
 from datetime import datetime
 
@@ -12,47 +10,16 @@ from storage import Listing, listing_fingerprint, listing_full_fingerprint, load
 # Scoring done via subprocess runners (deepseek_runner.py, photo_runner.py)
 from email_sender.digest import send_digest
 from config import ACCEPT_CITIES, EXCLUDE_CITIES_FINAL, EPC_ALLOWED, MIN_LOT_SURFACE, MIN_LIVING_SURFACE
+from dataclasses import fields
 from phases.embed_images import embed_images
 from scrapers.immoweb import ImmowebScraper
 from scrapers.zimmo import ZimmoScraper
 from scrapers.immoscoop import ImmoscoopScraper
 from scrapers.immovlan import ImmovlanScraper
 
-def run_with_timeout(func: Callable, timeout_seconds: int = 20, *args, **kwargs) -> Any:
-    """Run func with a hard timeout via thread + subprocess.
-    
-    Critical: ThreadPoolExecutor.__exit__ calls shutdown(wait=True), which
-    BLOCKS FOREVER if a thread is stuck on a network/socket call. We use
-    a manual shutdown(False) + signal approach instead.
-    """
-    class TimeoutError(Exception):
-        pass
-    
-    result_container = []
-    exception_container = []
-    
-    def worker():
-        try:
-            result_container.append(func(*args, **kwargs))
-        except Exception as e:
-            exception_container.append(e)
-    
-    import threading
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-    t.join(timeout=timeout_seconds)
-    
-    if exception_container:
-        raise exception_container[0]
-    if not result_container:
-        raise TimeoutError(f"Function timed out after {timeout_seconds}s")
-    return result_container[0]
-
-
 HISTORY_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "data" / "listing_history.json"
 
 def dict_to_listing(d):
-    from dataclasses import fields
     field_names = {f.name for f in fields(Listing)}
     kwargs = {k: v for k, v in d.items() if k in field_names}
     return Listing(**kwargs)
@@ -91,7 +58,7 @@ def dedup_listings(listings):
             if not any(c.isdigit() for c in fp.split("|")[0]):
                 fp = listing_fingerprint(listing)
         except Exception:
-            fp = f"{ld.get('address','')}|{ld.get('price',0)}|{ld.get('bedrooms',0)}|{ld.get('surface_m2',0)}"
+            fp = f"{ld.get('address','')}|{ld.get('price',0)}"
             fp = fp.replace(" ", "").lower()
         
         if fp in seen:
@@ -320,7 +287,7 @@ def update_history(listings):
             listing = dict_to_listing(ld)
             fp = listing_fingerprint(listing)
         except Exception:
-            fp = f"{ld.get('address','')}|{ld.get('price',0)}|{ld.get('bedrooms',0)}".replace(" ", "").lower()
+            fp = f"{ld.get('address','')}|{ld.get('price',0)}".replace(" ", "").lower()
         
         plat = ld.get("platform", "?")
         lid = str(ld.get("id", ""))
@@ -421,110 +388,72 @@ def main():
     # 3e. Enrich Zimmo listings — detail page voor straat+nummer
     zimmo_listings = [l for l in all_listings if l.get("platform") == "zimmo"]
 
-    # ─── Immoweb parallel ───
+    # ─── Immoweb enrich (sequential — _spawn_fetch heeft eigen daemon thread timeout) ───
     if house_listings:
         print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
         immoweb = ImmowebScraper()
         enriched_count = 0
 
-        def enrich_immoweb_one(ld):
-            listing = dict_to_listing(ld)
-            enriched = run_with_timeout(immoweb.enrich_listing, timeout_seconds=25, listing=listing)
-            ld["title"] = enriched.title or ld["title"]
-            ld["description"] = enriched.description or ld.get("description", "")
-            if enriched.image_urls:
-                ld["image_urls"] = enriched.image_urls
-            if enriched.epc_label:
-                ld["epc_label"] = enriched.epc_label
-            if enriched.surface_m2:
-                ld["surface_m2"] = enriched.surface_m2
-            if enriched.lot_surface_m2:
-                ld["lot_surface_m2"] = enriched.lot_surface_m2
-            if enriched.status:
-                ld["status"] = enriched.status
-            return True
+        for idx, ld in enumerate(house_listings, 1):
+            try:
+                listing = dict_to_listing(ld)
+                enriched = immoweb.enrich_listing(listing)
+                ld["title"] = enriched.title or ld["title"]
+                ld["description"] = enriched.description or ld.get("description", "")
+                if enriched.image_urls:
+                    ld["image_urls"] = enriched.image_urls
+                if enriched.epc_label:
+                    ld["epc_label"] = enriched.epc_label
+                if enriched.surface_m2:
+                    ld["surface_m2"] = enriched.surface_m2
+                if enriched.lot_surface_m2:
+                    ld["lot_surface_m2"] = enriched.lot_surface_m2
+                if enriched.status:
+                    ld["status"] = enriched.status
+                enriched_count += 1
+            except Exception as exc:
+                print(f"  ⚠ Fout bij Immoweb enrich {ld.get('id','?')}: {exc}")
+            if idx % 10 == 0:
+                print(f"  [{idx}/{len(house_listings)}] enrich bezig...")
+            if idx % 20 == 0:
+                gc.collect()
+        print(f"  ✅ Immoweb enrich: {enriched_count}/{len(house_listings)} gelukt")
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(enrich_immoweb_one, ld): ld for ld in house_listings}
-            done = 0
-            for f in as_completed(futures):
-                done += 1
-                try:
-                    f.result()
-                except Exception as exc:
-                    ld = futures[f]
-                    print(f"  ⚠ Fout bij enrich {ld.get('id')}: {exc}")
-                if done % 20 == 0:
-                    print(f"  [{done}/{len(house_listings)}] bezig...")
-        print(f"  ✅ Immoweb enrich gedaan ({len(house_listings)} stuks)")
-
-    # ─── Immoscoop parallel ───
+    # ─── Immoscoop enrich (sequential) ───
     if immoscoop_listings:
         print(f"🔍 Immoscoop fotos verrijken ({len(immoscoop_listings)} stuks)...")
         immoscoop = ImmoscoopScraper()
 
-        def enrich_immoscoop_one(ld):
-            listing = dict_to_listing(ld)
-            enriched = run_with_timeout(immoscoop.enrich_listing, timeout_seconds=25, listing=listing)
-            ld["description"] = enriched.description or ld.get("description", "")
-            if enriched.image_urls and len(enriched.image_urls) >= len(ld.get("image_urls", [])):
-                ld["image_urls"] = enriched.image_urls
-            if enriched.epc_label:
-                ld["epc_label"] = enriched.epc_label
-            if enriched.surface_m2:
-                ld["surface_m2"] = enriched.surface_m2
-            if enriched.lot_surface_m2:
-                ld["lot_surface_m2"] = enriched.lot_surface_m2
-            if enriched.bedrooms:
-                ld["bedrooms"] = enriched.bedrooms
-            if enriched.price:
-                ld["price"] = enriched.price
-            return True
-
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(enrich_immoscoop_one, ld): ld for ld in immoscoop_listings}
-            done = 0
-            for f in as_completed(futures):
-                done += 1
-                try:
-                    f.result()
-                except Exception as exc:
-                    ld = futures[f]
-                    print(f"  ⚠ Fout bij immoscoop enrich {ld.get('id')}: {exc}")
-                if done % 20 == 0:
-                    print(f"  [{done}/{len(immoscoop_listings)}] immoscoop bezig...")
-        print(f"  ✅ Immoscoop enrich gedaan ({len(immoscoop_listings)} stuks)")
-
-    # ─── Zimmo parallel ───
-    if zimmo_listings:
-        print(f"🔍 Zimmo adressen verrijken ({len(zimmo_listings)} stuks)...")
-        zimmo = ZimmoScraper()
-
-        def enrich_zimmo_one(ld):
-            listing = dict_to_listing(ld)
-            enriched = run_with_timeout(zimmo.enrich_listing, timeout_seconds=25, listing=listing)
-            if enriched:
-                ld["address"] = enriched.address or ld.get("address", "")
-                ld["title"] = enriched.title or ld.get("title", "")
+        enriched_count = 0
+        for idx, ld in enumerate(immoscoop_listings, 1):
+            try:
+                listing = dict_to_listing(ld)
+                enriched = immoscoop.enrich_listing(listing)
                 ld["description"] = enriched.description or ld.get("description", "")
-                ld["epc_label"] = enriched.epc_label or ld.get("epc_label")
                 if enriched.image_urls and len(enriched.image_urls) >= len(ld.get("image_urls", [])):
                     ld["image_urls"] = enriched.image_urls
-            return True
+                if enriched.epc_label:
+                    ld["epc_label"] = enriched.epc_label
+                if enriched.surface_m2:
+                    ld["surface_m2"] = enriched.surface_m2
+                if enriched.lot_surface_m2:
+                    ld["lot_surface_m2"] = enriched.lot_surface_m2
+                if enriched.bedrooms:
+                    ld["bedrooms"] = enriched.bedrooms
+                if enriched.price:
+                    ld["price"] = enriched.price
+                enriched_count += 1
+            except Exception as exc:
+                print(f"  ⚠ Fout bij Immoscoop enrich {ld.get('id','?')}: {exc}")
+            if idx % 10 == 0:
+                print(f"  [{idx}/{len(immoscoop_listings)}] enrich bezig...")
+            if idx % 20 == 0:
+                gc.collect()
+        print(f"  ✅ Immoscoop enrich: {enriched_count}/{len(immoscoop_listings)} gelukt")
 
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(enrich_zimmo_one, ld): ld for ld in zimmo_listings}
-            done = 0
-            for f in as_completed(futures):
-                done += 1
-                try:
-                    f.result()
-                except Exception as exc:
-                    ld = futures[f]
-                    print(f"  ⚠ Fout bij zimmo enrich {ld.get('id')}: {exc}")
-                if done % 20 == 0:
-                    print(f"  [{done}/{len(zimmo_listings)}] zimmo bezig...")
-        print(f"  ✅ Zimmo enrich gedaan ({len(zimmo_listings)} stuks)")
+    # ─── Zimmo skippen (data zit al in search page JSON) ───
+    if zimmo_listings:
+        print(f"  ⏩ Zimmo enrich overgeslagen — data al beschikbaar uit search page ({len(zimmo_listings)} stuks)")
     
     # 3f. Enrich Immovlan listings
     immovlan_listings = [l for l in all_listings if l.get("platform") == "immovlan"]
@@ -548,6 +477,8 @@ def main():
             except Exception as exc:
                 print(f"  ⚠ Fout bij immovlan enrich {ld.get('id')}: {exc}")
             time.sleep(0.3)
+            if idx % 20 == 0:
+                gc.collect()
         print(f"  ✅ Immovlan enrich gedaan ({len(immovlan_listings)} stuks)")
 
     # 3g. Universele enrich — extraheer missende velden uit beschrijving
@@ -567,8 +498,8 @@ def main():
             qf_reasons.append(f"  ⛔ {ld.get('id','?')}: EPC {epc} (niet in {EPC_ALLOWED})")
             continue
 
-        # Perceel filter: skip als perceel bekend is en te klein
-        if lot is not None and lot < MIN_LOT_SURFACE:
+        # Perceel filter: skip als perceel bekend (non-zero) is en te klein
+        if lot and lot >= 1 and lot < MIN_LOT_SURFACE:
             qf_reasons.append(f"  ⛔ {ld.get('id','?')}: perceel {lot}m² < {MIN_LOT_SURFACE}m²")
             continue
 
@@ -621,7 +552,7 @@ def main():
     try:
         proc = subprocess.run(
             [sys.executable, "-u", runner, _json.dumps(batch_input)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=300,
         )
         out_line = proc.stdout.strip()
         if not out_line:
@@ -649,7 +580,7 @@ def main():
                 ld["final_score"] = 5.0
                 scored.append((5.0, ld))
     except subprocess.TimeoutExpired:
-        print(f"  ⚠ DeepSeek subprocess timed out after 120s, using defaults")
+        print(f"  ⚠ DeepSeek subprocess timed out after 300s, using defaults")
         for ld in unique_listings:
             ld["text_score"] = 5.0
             ld["score_reasoning"] = "DeepSeek timeout"
@@ -686,7 +617,7 @@ def main():
     try:
         proc = subprocess.run(
             [sys.executable, "-u", photo_runner, _json.dumps(batch_input)],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=300,
         )
         out_line = proc.stdout.strip()
         if not out_line:
@@ -707,7 +638,7 @@ def main():
         else:
             print(f"  ⬜ Photo scorer failed: {result.get('err', 'unknown')}")
     except subprocess.TimeoutExpired:
-        print(f"  ⚠ Photo scoring timed out, using text scores only")
+        print(f"  ⚠ Photo scoring timed out after 300s, using text scores only")
     except Exception as e:
         print(f"  ⚠ Photo scoring error: {e}")
     
