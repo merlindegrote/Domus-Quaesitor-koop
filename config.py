@@ -24,12 +24,12 @@ TARGET_POSTAL_CODE = os.environ.get("TARGET_POSTAL_CODE", "2520").strip()
 try:
     MIN_PRICE = int(os.environ.get("MIN_PRICE", "400000"))
 except ValueError:
-    MIN_PRICE = 400000
+    MIN_PRICE = 375000
 
 try:
     MAX_PRICE = int(os.environ.get("MAX_PRICE", "700000"))
 except ValueError:
-    MAX_PRICE = 700000
+    MAX_PRICE = 665000
 
 try:
     MIN_BEDROOMS = int(os.environ.get("MIN_BEDROOMS", "3"))

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Merge alle batch outputs in /tmp/domus-batches/, dedup, score, output processed JSON"""
-import sys, os, json, glob, time, gc
+import sys, os, json, glob, time, gc, resource, re
 from pathlib import Path
 from datetime import datetime
 
@@ -18,6 +18,40 @@ from scrapers.immoscoop import ImmoscoopScraper
 from scrapers.immovlan import ImmovlanScraper
 
 HISTORY_FILE = Path(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))) / "data" / "listing_history.json"
+
+def _enrich_via_subprocess(listing_dict: dict, timeout: int = 45) -> dict:
+    """Verrijk 1 listing via apart subprocess.
+    
+    Doel: curl_cffi C-level geheugen wordt door OS opgeruimd
+    als het proces stopt. Geen accumulatie = geen hang na ~100 requests.
+    """
+    import subprocess as _sp
+    import json as _json
+    
+    worker = os.path.join(os.path.dirname(__file__), "..", "scrapers", "enrich_worker.py")
+    worker = os.path.abspath(worker)
+    
+    input_json = _json.dumps({"listing": listing_dict})
+    
+    try:
+        proc = _sp.run(
+            [sys.executable, worker],
+            input=input_json,
+            capture_output=True,
+            timeout=timeout,
+            text=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"}
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"Worker exit {proc.returncode}: {proc.stderr[:200]}")
+        result = _json.loads(proc.stdout)
+        if result.get("ok"):
+            return result["listing"]
+        else:
+            raise RuntimeError(result.get("error", "onbekende fout"))
+    except _sp.TimeoutExpired:
+        raise TimeoutError(f"Enrich worker timeout na {timeout}s")
+
 
 def dict_to_listing(d):
     field_names = {f.name for f in fields(Listing)}
@@ -45,16 +79,41 @@ def dedup_listings(listings):
     """Dedup + merge:zelfde huis = 1 entry met beste info uit alle bronnen.
     
     Stappen:
-    1. Eerst op volledig adres (met huisnummer) — want in 1 straat staan meerdere huizen
+    0. Eerst op platform+ID (altijd zelfde huis, ongeacht adres)
+    1. Dan op volledig adres (met huisnummer)
     2. Fallback op straatnaam als adres geen huisnummer heeft
     """
     seen = {}
+    seen_by_id = {}
     merged_ids = set()
     for ld in listings:
+        platform = ld.get("platform", "")
+        lid = str(ld.get("id", ""))
+        pid_key = f"{platform}|{lid}" if lid else ""
+        
+        if pid_key and pid_key in seen_by_id:
+            existing = seen_by_id[pid_key]
+            merged = _merge_listings(existing, ld)
+            seen_by_id[pid_key] = merged
+            for old_fp, old_ld in list(seen.items()):
+                if old_ld is existing:
+                    del seen[old_fp]
+                    break
+            try:
+                listing = dict_to_listing(merged)
+                fp = listing_full_fingerprint(listing)
+                if not any(c.isdigit() for c in fp.split("|")[0]):
+                    fp = listing_fingerprint(listing)
+            except Exception:
+                fp = f"{merged.get('address','')}|{merged.get('price',0)}"
+                fp = fp.replace(" ", "").lower()
+            seen[fp] = merged
+            merged_ids.add(lid)
+            continue
+        
         try:
             listing = dict_to_listing(ld)
             fp = listing_full_fingerprint(listing)
-            # Als volledig adres geen huisnummer heeft, val terug naar straatnaam
             if not any(c.isdigit() for c in fp.split("|")[0]):
                 fp = listing_fingerprint(listing)
         except Exception:
@@ -65,9 +124,12 @@ def dedup_listings(listings):
             existing = seen[fp]
             merged = _merge_listings(existing, ld)
             seen[fp] = merged
-            merged_ids.add(ld.get("id"))
+            merged_ids.add(lid)
         else:
             seen[fp] = ld
+        
+        if pid_key:
+            seen_by_id[pid_key] = seen[fp]
     
     return list(seen.values())
 
@@ -390,34 +452,57 @@ def main():
 
     # ─── Immoweb enrich (sequential — _spawn_fetch heeft eigen daemon thread timeout) ───
     if house_listings:
-        print(f"🔍 Immoweb House-titels verrijken ({len(house_listings)} stuks)...")
-        immoweb = ImmowebScraper()
+        BATCH_SIZE = 20
+        total_iw = len(house_listings)
+        print(f"🔍 Immoweb House-titels verrijken ({total_iw} stuks in batches van {BATCH_SIZE})...")
         enriched_count = 0
 
-        for idx, ld in enumerate(house_listings, 1):
-            try:
-                listing = dict_to_listing(ld)
-                enriched = immoweb.enrich_listing(listing)
-                ld["title"] = enriched.title or ld["title"]
-                ld["description"] = enriched.description or ld.get("description", "")
-                if enriched.image_urls:
-                    ld["image_urls"] = enriched.image_urls
-                if enriched.epc_label:
-                    ld["epc_label"] = enriched.epc_label
-                if enriched.surface_m2:
-                    ld["surface_m2"] = enriched.surface_m2
-                if enriched.lot_surface_m2:
-                    ld["lot_surface_m2"] = enriched.lot_surface_m2
-                if enriched.status:
-                    ld["status"] = enriched.status
-                enriched_count += 1
-            except Exception as exc:
-                print(f"  ⚠ Fout bij Immoweb enrich {ld.get('id','?')}: {exc}")
-            if idx % 10 == 0:
-                print(f"  [{idx}/{len(house_listings)}] enrich bezig...")
-            if idx % 20 == 0:
-                gc.collect()
-        print(f"  ✅ Immoweb enrich: {enriched_count}/{len(house_listings)} gelukt")
+        for batch_start in range(0, total_iw, BATCH_SIZE):
+            immoweb = ImmowebScraper()  # verse scraper per batch — curl_cffi accumuleert interne state
+            batch_end = min(batch_start + BATCH_SIZE, total_iw)
+            batch = house_listings[batch_start:batch_end]
+            batch_num = batch_start // BATCH_SIZE + 1
+            total_batches = (total_iw + BATCH_SIZE - 1) // BATCH_SIZE
+            print(f"  [{time.strftime('%H:%M:%S')}] Batch {batch_num}/{total_batches} ({batch_start+1}-{batch_end} van {total_iw})")
+
+            # Pre-batch memory check
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            mem_mb = usage.ru_maxrss / 1024  # Linux reports in KB
+            print(f"    Geheugen: {mem_mb:.0f} MB")
+
+            for idx_offset, ld in enumerate(batch):
+                idx = batch_start + idx_offset + 1
+                try:
+                    listing = dict_to_listing(ld)
+                    enriched = immoweb.enrich_listing(listing)
+                    ld["title"] = enriched.title or ld["title"]
+                    ld["description"] = enriched.description or ld.get("description", "")
+                    if enriched.image_urls:
+                        ld["image_urls"] = enriched.image_urls
+                    if enriched.epc_label:
+                        ld["epc_label"] = enriched.epc_label
+                    if enriched.surface_m2:
+                        ld["surface_m2"] = enriched.surface_m2
+                    if enriched.lot_surface_m2:
+                        ld["lot_surface_m2"] = enriched.lot_surface_m2
+                    if enriched.status:
+                        ld["status"] = enriched.status
+                    enriched_count += 1
+                except Exception as exc:
+                    print(f"  ⚠ Fout bij Immoweb enrich {ld.get('id','?')}: {exc}")
+                if (idx) % 10 == 0:
+                    print(f"  [{time.strftime('%H:%M:%S')}] [{idx}/{total_iw}] enrich bezig...")
+                if (idx) % 5 == 0:
+                    gc.collect()
+
+            # Post-batch: forced GC + memory reset
+            gc.collect()
+            gc.collect()  # twee keer voor generaties
+            usage = resource.getrusage(resource.RUSAGE_SELF)
+            mem_mb = usage.ru_maxrss / 1024
+            print(f"    Geheugen na batch: {mem_mb:.0f} MB — {enriched_count}/{idx} enriched")
+
+        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Immoweb enrich: {enriched_count}/{total_iw} gelukt")
 
     # ─── Immoscoop enrich (sequential) ───
     if immoscoop_listings:
@@ -447,9 +532,11 @@ def main():
                 print(f"  ⚠ Fout bij Immoscoop enrich {ld.get('id','?')}: {exc}")
             if idx % 10 == 0:
                 print(f"  [{idx}/{len(immoscoop_listings)}] enrich bezig...")
-            if idx % 20 == 0:
+            if idx % 10 == 0:
                 gc.collect()
-        print(f"  ✅ Immoscoop enrich: {enriched_count}/{len(immoscoop_listings)} gelukt")
+            if idx % 20 == 0:
+                print(f"  [{time.strftime('%H:%M:%S')}] [{idx}/{len(immoscoop_listings)}] immoscoop enrich bezig...")
+        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Immoscoop enrich: {enriched_count}/{len(immoscoop_listings)} gelukt")
 
     # ─── Zimmo skippen (data zit al in search page JSON) ───
     if zimmo_listings:
@@ -479,12 +566,37 @@ def main():
             time.sleep(0.3)
             if idx % 20 == 0:
                 gc.collect()
-        print(f"  ✅ Immovlan enrich gedaan ({len(immovlan_listings)} stuks)")
+        print(f"  [{time.strftime('%H:%M:%S')}] ✅ Immovlan enrich gedaan ({len(immovlan_listings)} stuks)")
 
     # 3g. Universele enrich — extraheer missende velden uit beschrijving
     all_listings = _enrich_from_description(all_listings)
 
-    # 3h. Quality filter — EPC, perceel, woonopp
+    # 3h. Adres filter — geen straat = eruit
+    before_addr = len(all_listings)
+    addr_filtered = []
+    for ld in all_listings:
+        addr = (ld.get("address") or "").strip()
+        # Filter: alleen postcode+stad ("2500 Lier") of alleen stad ("Ranst")
+        # ✅ Pater Domstraat 30, 2520 Broechem — heeft straat + huisnummer
+        # ❌ 2500 Lier — alleen postcode + stad
+        # ❌ Ranst — alleen stad
+        has_number = bool(re.search(r'\d', addr))
+        starts_with_postcode = bool(re.match(r'^\d{4}\s+\w', addr))
+        if not has_number or starts_with_postcode:
+            continue  # geen straatadres → skippen
+        addr_filtered.append(ld)
+    removed_addr = before_addr - len(addr_filtered)
+    if removed_addr:
+        print(f"⛔ Adres filter: {removed_addr} verwijderd (geen straat)")
+        for ld in all_listings:
+            addr = (ld.get("address") or "").strip()
+            has_number = bool(re.search(r'\d', addr))
+            starts_with_postcode = bool(re.match(r'^\d{4}\s+\w', addr))
+            if not has_number or starts_with_postcode:
+                print(f"  ⛔ {ld.get('id','?')}: adres='{addr}'")
+    all_listings = addr_filtered
+
+    # 3i. Quality filter — EPC, perceel, woonopp
     before_qf = len(all_listings)
     qf_reasons = []
     filtered_qf = []
@@ -653,7 +765,7 @@ def main():
     if filtered_low:
         print(f"⏬ {filtered_low} listings uitgefilterd (score ≤ 5.0)")
     
-    print(f"\n📊 Scoring voltooid — top 5:")
+    print(f"\n[{time.strftime('%H:%M:%S')}] 📊 Scoring voltooid — top 5:")
     for score, ld in scored[:5]:
         title = ld.get("title", "?")[:60]
         price = ld.get("price", 0)
@@ -709,4 +821,16 @@ def main():
     print(f"{'='*50}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        log_path = "/tmp/domus-process-all-crash.log"
+        with open(log_path, "w") as f:
+            f.write(f"CRASH at {datetime.now().isoformat()}\n")
+            f.write(f"Error: {e}\n")
+            f.write(tb)
+        print(f"❌ CRASH: {e}", file=sys.stderr)
+        print(f"   Details: {log_path}", file=sys.stderr)
+        sys.exit(1)

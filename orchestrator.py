@@ -17,6 +17,15 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 # Globale tracking van Popen objecten — zodat we ze kunnen killen bij timeout
 _ACTIVE_POPENS: list[subprocess.Popen] = []
 
+# Scraper health tracking — results dict keys -> platform names
+_SCRAPER_PLATFORM_MAP = {
+    "Immoweb": "immoweb",
+    "Zimmo": "zimmo",
+    "Immoscoop": "immoscoop",
+    "2dehands": "2dehands",
+    "Immovlan": "immovlan",
+}
+
 def log(msg):
     print(f"[{time.strftime('%H:%M:%S')}] {msg}")
 
@@ -146,6 +155,16 @@ def phase1_collect():
             results[name] = (False, True)
             log(f"  💀 {name}: timeout {deadlinems:.0f}s, overgeslagen")
     
+    # Record health for killed scrapers
+    for name, (ok, killed) in results.items():
+        if killed and not ok:
+            platform = _SCRAPER_PLATFORM_MAP.get(name, name.lower())
+            try:
+                from scrapers.base import record_scraper_failure
+                record_scraper_failure(platform, "Killed by orchestrator timeout")
+            except ImportError:
+                pass
+
     # Toon resultaten
     ok_count = sum(1 for ok, _ in results.values() if ok)
     killed_count = sum(1 for _, killed in results.values() if killed)
@@ -264,7 +283,10 @@ def main():
             log(f"❌ Pipeline error: {e}")
         finally:
             if not pipeline_completed:
-                executor.shutdown(wait=False, kill_future=True)
+                try:
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
                 kill_all_active()
     
     # Fallback: draai process_all.py met wat er al is in /tmp/domus-batches/
@@ -287,6 +309,14 @@ def main():
     log(f"🏁 KLAAR in {elapsed/60:.1f} min")
     print("=" * 55)
     
+    # Scraper health summary
+    try:
+        from scrapers.base import show_health_summary
+        for line in show_health_summary().split(chr(10)):
+            log(line)
+    except Exception as e:
+        log(f"Health summary unavailable: {e}")
+
     # Check op achtergebleven processen
     log("🧹 Cleanup check...")
     kill_all_active()

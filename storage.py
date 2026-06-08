@@ -16,8 +16,10 @@ logger = logging.getLogger(__name__)
 HISTORY_VERSION = 1
 
 
-def load_seen_ids(path: Path) -> set[str]:
+def load_seen_ids(path: Path | str) -> set[str]:
     """Load the legacy seen-listings file."""
+    if isinstance(path, str):
+        path = Path(path)
     if not path.exists():
         return set()
 
@@ -34,20 +36,28 @@ def load_seen_ids(path: Path) -> set[str]:
     return set()
 
 
-def save_seen_ids(path: Path, seen_ids: set[str]) -> None:
+def save_seen_ids(path: Path | str, seen_ids: set[str]) -> None:
     """Write the legacy seen-listings file for backward compatibility."""
+    if isinstance(path, str):
+        path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(sorted(seen_ids), handle, indent=2)
 
 
-def load_history(path: Path) -> dict:
-    """Load listing history and weekly-report metadata."""
+def load_history(path: Path | str) -> dict:
+    """Load listing history and weekly-report metadata.
+
+    Accepts both Path and str for convenience.
+    """
     default_history = {
         "version": HISTORY_VERSION,
         "records": {},
         "weekly_reports_sent": [],
     }
+
+    if isinstance(path, str):
+        path = Path(path)
 
     if not path.exists():
         return default_history
@@ -72,8 +82,13 @@ def load_history(path: Path) -> dict:
     }
 
 
-def save_history(path: Path, history: dict) -> None:
-    """Persist listing history."""
+def save_history(path: Path | str, history: dict) -> None:
+    """Persist listing history.
+
+    Accepts both Path and str for convenience.
+    """
+    if isinstance(path, str):
+        path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         json.dump(history, handle, indent=2, ensure_ascii=False)

@@ -265,6 +265,22 @@ class ImmoscoopScraper(BaseScraper):
                 if image_urls:
                     listing.image_urls = image_urls
 
+                # Adres — altijd updaten (search page mist soms straat)
+                addr = prop.get("address", {})
+                if isinstance(addr, dict):
+                    street = addr.get("street", "")
+                    hnr = addr.get("houseNumber", {})
+                    if isinstance(hnr, dict):
+                        hnr = hnr.get("number", "")
+                    city = addr.get("city", {}).get("label", "") if isinstance(addr.get("city"), dict) else ""
+                    postal = addr.get("postalCode", "")
+                    if street and hnr:
+                        listing.address = f"{street} {hnr}, {postal} {city}"
+                        listing.title = f"{street} {hnr} — {city.upper()}"
+                    elif street:
+                        listing.address = f"{street}, {postal} {city}"
+                        listing.title = f"{street} — {city.upper()}"
+
                 # EPC — uit features (id == "EpcClass") of propertyDetailGroups
                 if not listing.epc_label:
                     for feature in prop.get("features", []):

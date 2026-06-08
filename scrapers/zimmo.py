@@ -129,6 +129,8 @@ class ZimmoScraper(BaseScraper):
                 continue
             if not href.startswith("http"):
                 href = f"https://www.zimmo.be{href}"
+            # Strip query params — only keep clean listing detail URL
+            clean_url = href.split("?")[0].rstrip("/") + "/"
 
             listing_id = self._extract_id_from_url(href)
             if not listing_id or listing_id in seen_ids:
@@ -165,7 +167,7 @@ class ZimmoScraper(BaseScraper):
                 price=price,
                 bedrooms=max(bedrooms, MIN_BEDROOMS),
                 address=address,
-                url=href,
+                url=clean_url,
                 description="",
                 image_urls=image_urls,
                 surface_m2=surface,
@@ -556,6 +558,8 @@ class ZimmoScraper(BaseScraper):
                 return None
             if not href.startswith("http"):
                 href = f"https://www.zimmo.be{href}"
+            # Strip query params — only keep clean listing detail URL
+            clean_url = href.split("?")[0].rstrip("/") + "/"
             listing_id = self._extract_id_from_url(href)
             if not listing_id:
                 return None
@@ -610,7 +614,7 @@ class ZimmoScraper(BaseScraper):
                 price=price,
                 bedrooms=max(bedrooms, MIN_BEDROOMS),
                 address=address,
-                url=href,
+                url=clean_url,
                 description="",
                 image_urls=[image_url] if image_url else [],
                 surface_m2=surface,

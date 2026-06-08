@@ -26,7 +26,7 @@ class ImmowebScraper(BaseScraper):
     """Scraper for Immoweb.be house for-sale listings."""
 
     PLATFORM_NAME = "immoweb"
-    REQUEST_DELAY = 2.0
+    REQUEST_DELAY = 0.3  # 2.0 was voor scrape, enrich detailpagina's hebben minder rate limiting nodig
     MAX_PAGES = 3
 
     @staticmethod
