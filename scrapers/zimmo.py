@@ -493,7 +493,7 @@ class ZimmoScraper(BaseScraper):
                 full_address = f"{postal} {city}"
 
             # URL
-            url = f"https://www.zimmo.be/nl/{city.lower()}-{postal}/huis/{listing_id}"
+            url = f"https://www.zimmo.be/nl/{city.lower()}-{postal}/te-koop/huis/{listing_id}"
 
             # Images — firstImages has 5 photos, hoofdFoto has 1
             images = item.get("firstImages", []) or []
